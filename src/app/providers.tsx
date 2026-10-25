@@ -10,6 +10,13 @@ import type { LocalProfile, Theme } from "../types";
 import { STORAGE_KEYS } from "../lib/constants";
 import { createId, readLocalJson, writeLocalJson } from "../lib/utils";
 import { useTheme } from "../hooks/useTheme";
+import {
+  seedFakeDatasets,
+  MENSTRUAL_PERSONA_ID,
+  MATERNITY_PERSONA_ID,
+  MENOPAUSE_PERSONA_ID,
+} from "../data/fakeDatasets";
+import { db } from "../data/db";
 
 interface AppContextValue {
   profiles: LocalProfile[];
@@ -20,9 +27,38 @@ interface AppContextValue {
   selectProfile: (profileId: string) => void;
   clearActiveProfile: () => void;
   deleteProfile: (profileId: string) => void;
+  loadDemoProfiles: () => Promise<void>;
+  loginAsDemoPersona: (persona: "menstrual" | "maternity" | "menopause") => Promise<LocalProfile>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
+
+export const DEFAULT_DEMO_PROFILES: LocalProfile[] = [
+  {
+    id: MENSTRUAL_PERSONA_ID,
+    nickname: "Priya (Menstrual Demo)",
+    avatarColor: "#C77D88",
+    journey: "menstrual",
+    createdAt: "2026-08-15T08:00:00.000Z",
+    isSample: true,
+  },
+  {
+    id: MATERNITY_PERSONA_ID,
+    nickname: "Aria (Maternity Demo)",
+    avatarColor: "#8C9B83",
+    journey: "maternity",
+    createdAt: "2026-06-01T08:00:00.000Z",
+    isSample: true,
+  },
+  {
+    id: MENOPAUSE_PERSONA_ID,
+    nickname: "Elena (Menopause Demo)",
+    avatarColor: "#B69BC8",
+    journey: "menopause",
+    createdAt: "2026-05-10T08:00:00.000Z",
+    isSample: true,
+  },
+];
 
 export function AppProviders({ children }: { children: ReactNode }) {
   const [profiles, setProfiles] = useState<LocalProfile[]>(() =>
@@ -94,6 +130,36 @@ export function AppProviders({ children }: { children: ReactNode }) {
     }
   }
 
+  async function loadDemoProfiles() {
+    // 1. Seed IndexedDB with all clinical records, check-ins, birth plans, and appointments
+    await seedFakeDatasets(db);
+
+    // 2. Merge demo profiles into local profile state
+    setProfiles((current) => {
+      const existingIds = new Set(current.map((p) => p.id));
+      const missing = DEFAULT_DEMO_PROFILES.filter((p) => !existingIds.has(p.id));
+      return [...current, ...missing];
+    });
+
+    if (!activeProfileId) {
+      setActiveProfileId(MENSTRUAL_PERSONA_ID);
+    }
+  }
+
+  async function loginAsDemoPersona(persona: "menstrual" | "maternity" | "menopause"): Promise<LocalProfile> {
+    await seedFakeDatasets(db);
+
+    const target = DEFAULT_DEMO_PROFILES.find((p) => p.journey === persona) || DEFAULT_DEMO_PROFILES[0];
+
+    setProfiles((current) => {
+      if (current.some((p) => p.id === target.id)) return current;
+      return [...current, target];
+    });
+
+    setActiveProfileId(target.id);
+    return target;
+  }
+
   const value: AppContextValue = {
     profiles,
     activeProfile,
@@ -103,6 +169,8 @@ export function AppProviders({ children }: { children: ReactNode }) {
     selectProfile,
     clearActiveProfile,
     deleteProfile,
+    loadDemoProfiles,
+    loginAsDemoPersona,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
