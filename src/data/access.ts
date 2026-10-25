@@ -1,0 +1,2687 @@
+import Dexie, { type Table } from 'dexie';
+import { createSessionInvalidationChannel } from './sessionChannel';
+
+import type {
+  Profile,
+  HealthProfile,
+  JourneyProfile,
+  CheckIn,
+  HealthRecord,
+  Appointment,
+  Notification,
+  Bookmark,
+  RecentlyViewed,
+  Consent,
+  Settings,
+  BaseEntity,
+  Id,
+  Journey,
+  ProfileCreation,
+  PublicProfile,
+  ProfileWipeResult,
+  StoragePersistenceStatus
+} from '../core/contracts';
+
+import {
+  checkInInputSchema,
+  healthProfileInputSchema,
+  healthRecordInputSchema,
+  appointmentInputSchema,
+  journeyProfileInputSchema,
+  notificationInputSchema,
+  bookmarkInputSchema,
+  recentlyViewedInputSchema,
+  consentInputSchema,
+  profileInputSchema,
+  settingsInputSchema,
+  isoDateSchema,
+  journeySchema,
+  databaseRowSchemas
+} from '../contract/schemas';
+
+export class CoreError extends Error {
+  constructor(
+    public code:
+      | 'VALIDATION'
+      | 'STORAGE_FULL'
+      | 'LOCKED'
+      | 'NOT_FOUND'
+      | 'CONFLICT'
+      | 'CRYPTO'
+      | 'UNKNOWN',
+    message: string
+  ) {
+    super(message);
+    this.name = 'CoreError';
+  }
+}
+
+export class FemoraDB extends Dexie {
+  profiles!: Table<Profile, string>;
+  healthProfile!: Table<HealthProfile, string>;
+  journeyProfiles!: Table<JourneyProfile, string>;
+  checkins!: Table<CheckIn, string>;
+  records!: Table<HealthRecord, string>;
+  appointments!: Table<Appointment, string>;
+  notifications!: Table<Notification, string>;
+  bookmarks!: Table<Bookmark, string>;
+  recentlyViewed!: Table<RecentlyViewed, string>;
+  consents!: Table<Consent, string>;
+  settings!: Table<Settings, string>;
+
+  constructor(name = 'femora') {
+    super(name);
+
+    const schema = {
+      profiles: 'id,profileId,updatedAt',
+      healthProfile: 'id,profileId,[profileId+updatedAt]',
+      journeyProfiles: 'id,profileId,journey,status,[profileId+journey]',
+      checkins:
+        'id,profileId,journey,date,[profileId+date],[profileId+journey+date]',
+      records:
+        'id,profileId,journey,type,date,[profileId+date],[profileId+journey+type]',
+      appointments: 'id,profileId,dateTime,[profileId+dateTime]',
+      notifications: 'id,profileId,readAt,[profileId+createdAt]',
+      bookmarks: 'id,profileId,targetType,targetId,[profileId+targetId]',
+      recentlyViewed: 'id,profileId,viewedAt,[profileId+viewedAt]',
+      consents: 'id,profileId,purpose,[profileId+purpose]',
+      settings: 'id,profileId'
+    };
+
+    const oldSchema = {
+      ...schema,
+      profiles: 'id,updatedAt',
+      records: 'id,profileId,journey,type,date,[profileId+date]'
+    };
+
+    this.version(1).stores(oldSchema);
+
+    this.version(2).stores(schema).upgrade(async tx => {
+      await tx.table('profiles').toCollection().modify(p => {
+        p.profileId = p.profileId ?? p.id;
+      });
+
+      await tx.table('appointments').toCollection().modify(a => {
+        if (
+          typeof a.dateTime === 'string' &&
+          Number.isFinite(Date.parse(a.dateTime))
+        ) {
+          a.dateTime = new Date(a.dateTime).toISOString();
+        }
+      });
+
+      await tx.table('settings').toCollection().modify(s => {
+        s.lockAfterMs = s.lockAfterMs ?? 600000;
+        s.pinCheck = s.pinCheck ?? s.pinVerifier;
+        s.kdfVersion = s.kdfVersion ?? 1;
+      });
+    });
+
+    this.version(3).stores({
+      ...schema,
+      records:
+        'id,profileId,journey,type,date,[profileId+date],[profileId+journey+type]'
+    });
+
+    this.version(4)
+      .stores({
+        ...schema,
+        checkins:
+          'id,profileId,journey,date,loggedAt,[profileId+date],[profileId+journey+date],[profileId+journey+loggedAt]'
+      })
+      .upgrade(async tx => {
+        await tx.table('checkins').toCollection().modify(c => {
+          if (
+            typeof c.loggedAt !== 'string' ||
+            !Number.isFinite(Date.parse(c.loggedAt))
+          ) {
+            c.loggedAt =
+              typeof c.createdAt === 'string' &&
+              Number.isFinite(Date.parse(c.createdAt))
+                ? new Date(c.createdAt).toISOString()
+                : typeof c.date === 'string' &&
+                    Number.isFinite(
+                      Date.parse(`${c.date}T00:00:00Z`)
+                    )
+                  ? new Date(`${c.date}T00:00:00Z`).toISOString()
+                  : undefined;
+          }
+        });
+
+        await tx.table('journeyProfiles').toCollection().modify(j => {
+          for (const key of ['startedAt', 'endedAt']) {
+            if (
+              typeof j[key] === 'string' &&
+              j[key].includes('T') &&
+              Number.isFinite(Date.parse(j[key]))
+            ) {
+              j[key] = j[key].slice(0, 10);
+            }
+          }
+        });
+      });
+  }
+}
+
+export const db = new FemoraDB();
+
+const stamp = () => new Date().toISOString();
+const uuid = () => crypto.randomUUID();
+
+let activeProfileId: string | null = null;
+
+let activeVault: {
+  profileId: string;
+  key: CryptoKey | undefined;
+  lastActivity: number;
+  locked: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+} | null = null;
+
+let sessionRevision = 0;
+
+function expireVault(vault = activeVault, broadcast = true) {
+  if (broadcast && vault) {
+    sessionChannel.invalidate(vault.profileId);
+  }
+
+  if (vault) {
+    if (vault.timer) clearTimeout(vault.timer);
+    vault.locked = true;
+    vault.key = undefined;
+  }
+
+  if (activeVault === vault) {
+    activeVault = null;
+    activeProfileId = null;
+    sessionRevision++;
+  }
+}
+
+function handleRemoteInvalidation(profileId: string) {
+  if (activeProfileId !== profileId) return;
+
+  if (activeVault) {
+    expireVault(activeVault, false);
+  } else {
+    activeProfileId = null;
+    sessionRevision++;
+  }
+}
+
+const sessionChannel =
+  createSessionInvalidationChannel(handleRemoteInvalidation);
+
+export function closeSessionInvalidationChannel() {
+  sessionChannel.close();
+}
+
+function armAutoLock(
+  vault: NonNullable<typeof activeVault>,
+  revision: number
+) {
+  if (vault.timer) clearTimeout(vault.timer);
+
+  vault.timer = setTimeout(() => {
+    if (activeVault === vault && sessionRevision === revision) {
+      const remaining =
+        600000 - (Date.now() - vault.lastActivity);
+
+      if (remaining > 0) {
+        armAutoLock(vault, revision);
+      } else {
+        expireVault(vault);
+      }
+    }
+  }, 600000);
+}
+
+function ensureProfile(profileId: string) {
+  if (!activeProfileId || activeProfileId !== profileId) {
+    throw new CoreError(
+      'LOCKED',
+      'Select this profile before accessing its data'
+    );
+  }
+
+  if (
+    activeVault &&
+    (
+      activeVault.profileId !== profileId ||
+      activeVault.locked ||
+      !activeVault.key ||
+      Date.now() - activeVault.lastActivity >= 600000
+    )
+  ) {
+    expireVault(activeVault);
+    throw new CoreError('LOCKED', 'Profile is locked');
+  }
+
+  if (activeVault) {
+    activeVault.lastActivity = Date.now();
+    armAutoLock(activeVault, sessionRevision);
+  }
+
+  return sessionRevision;
+}
+
+function isQuota(e: unknown) {
+  return (
+    !!e &&
+    typeof e === 'object' &&
+    'name' in e &&
+    (
+      (e as { name: string }).name === 'QuotaExceededError' ||
+      (e as { name: string }).name ===
+        'NS_ERROR_DOM_QUOTA_REACHED'
+    )
+  );
+}
+
+function validateWrite<T>(
+  table: Table<T, string>,
+  value: unknown
+) {
+  const schemas: Record<
+    string,
+    {
+      safeParse: (
+        v: unknown
+      ) => { success: boolean; data?: unknown };
+    }
+  > = {
+    checkins: checkInInputSchema,
+    healthProfile: healthProfileInputSchema,
+    records: healthRecordInputSchema,
+    appointments: appointmentInputSchema,
+    journeyProfiles: journeyProfileInputSchema,
+    notifications: notificationInputSchema,
+    bookmarks: bookmarkInputSchema,
+    recentlyViewed: recentlyViewedInputSchema,
+    consents: consentInputSchema
+  };
+
+  const schema = schemas[table.name];
+
+  if (!schema) {
+    throw new CoreError(
+      'VALIDATION',
+      'Writes to this table are not supported through the scoped write API'
+    );
+  }
+
+  const result = schema.safeParse(value);
+
+  if (!result.success) {
+    throw new CoreError(
+      'VALIDATION',
+      'Record failed validation'
+    );
+  }
+
+  return result.data;
+}
+
+function aad(meta: Record<string, string>) {
+  return new TextEncoder().encode(JSON.stringify(meta));
+}
+
+async function encryptPayload(
+  key: CryptoKey,
+  payload: unknown,
+  meta: Record<string, string>
+) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const additionalData = aad(meta);
+  const plain = new TextEncoder().encode(
+    JSON.stringify(payload)
+  );
+
+  const cipher = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv,
+      additionalData
+    },
+    key,
+    plain
+  );
+
+  return {
+    iv: Array.from(iv),
+    cipher: Array.from(new Uint8Array(cipher))
+  };
+}
+
+async function decryptPayload(
+  key: CryptoKey,
+  box: { iv: number[]; cipher: number[] },
+  meta: Record<string, string>
+) {
+  const plain = await crypto.subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: new Uint8Array(box.iv),
+      additionalData: aad(meta)
+    },
+    key,
+    new Uint8Array(box.cipher)
+  );
+
+  return JSON.parse(
+    new TextDecoder().decode(plain)
+  ) as Record<string, unknown>;
+}
+
+const tables = () =>
+  [
+    db.healthProfile,
+    db.journeyProfiles,
+    db.checkins,
+    db.records,
+    db.appointments,
+    db.notifications,
+    db.bookmarks,
+    db.recentlyViewed,
+    db.consents,
+    db.settings
+  ] as Table<BaseEntity, string>[];
+
+async function profileEncryptionStatus(
+  profileId: string
+): Promise<boolean> {
+  const setting = await db.settings
+    .where('profileId')
+    .equals(profileId)
+    .first();
+
+  if (
+    !setting?.pinEnabled ||
+    !settingsInputSchema.safeParse(setting).success ||
+    !setting.pinSalt ||
+    !setting.pinCheck ||
+    !setting.kdfVersion ||
+    !setting.kdfIterations ||
+    !setting.encryptedDataKey
+  ) {
+    return false;
+  }
+
+  const sensitive = [
+    'data',
+    'symptoms',
+    'notes',
+    'conditions',
+    'allergies',
+    'medications',
+    'birthDate',
+    'title',
+    'message',
+    'metadata'
+  ];
+
+  for (const table of [
+    db.healthProfile,
+    db.journeyProfiles,
+    db.checkins,
+    db.records,
+    db.appointments,
+    db.notifications
+  ] as Table<BaseEntity, string>[]) {
+    for (
+      const row of await table
+        .where('profileId')
+        .equals(profileId)
+        .toArray()
+    ) {
+      const raw = row as BaseEntity &
+        Record<string, unknown>;
+
+      const hasPayload =
+        raw.encryptedPayload !== undefined;
+
+      const hasSensitive = sensitive.some(
+        key => key in raw
+      );
+
+      if (hasSensitive && !hasPayload) return false;
+
+      if (hasPayload) {
+        const parsed =
+          databaseRowSchemas[table.name]?.safeParse(raw);
+
+        if (!parsed?.success) return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+export async function getProfileEncryptionStatus(
+  profileId: string
+) {
+  return profileEncryptionStatus(profileId);
+}
+
+async function activateJourneyState(
+  profileId: string,
+  journey: Journey
+) {
+  const items = await db.journeyProfiles
+    .where({ profileId, journey })
+    .toArray();
+
+  const now = stamp();
+
+  let current = items.find(
+    item => item.status === 'active'
+  );
+
+  if (current) return current;
+
+  current = items[0];
+
+  if (current) {
+    current.status = 'active';
+    current.endedAt = undefined;
+    current.updatedAt = now;
+
+    await db.journeyProfiles.put(current);
+
+    return current;
+  }
+
+  const created: JourneyProfile = {
+    id: uuid(),
+    profileId,
+    journey,
+    status: 'active',
+    startedAt: now.slice(0, 10),
+    createdAt: now,
+    updatedAt: now
+  };
+
+  await db.journeyProfiles.add(created);
+
+  return created;
+}
+
+export const profiles = {
+  create: async (
+    displayName: string
+  ): Promise<ProfileCreation> => {
+    const parsed = profileInputSchema.safeParse({
+      displayName
+    });
+
+    if (!parsed.success) {
+      throw new CoreError(
+        'VALIDATION',
+        'Profile did not pass validation'
+      );
+    }
+
+    const firstProfile = (await db.profiles.count()) === 0;
+
+    const storagePersistence = firstProfile
+      ? await requestStoragePersistenceStatus()
+      : await getStoragePersistenceDetails();
+
+    const persistentStorageGranted =
+      storagePersistence.granted;
+
+    const profileId = uuid();
+
+    const p: Profile = {
+      id: profileId,
+      profileId,
+      displayName: parsed.data.displayName,
+      createdAt: stamp(),
+      updatedAt: stamp()
+    };
+
+    try {
+      await db.profiles.add(p);
+
+      return {
+        ...p,
+        isEncrypted: false,
+        persistentStorageGranted,
+        storagePersistence
+      };
+    } catch (e) {
+      if (isQuota(e)) {
+        throw new CoreError(
+          'STORAGE_FULL',
+          'Storage is full'
+        );
+      }
+
+      throw e;
+    }
+  },
+
+  list: async (): Promise<PublicProfile[]> =>
+    Promise.all(
+      (await db.profiles.toArray()).map(
+        async p => ({
+          ...p,
+          isEncrypted: await profileEncryptionStatus(p.id)
+        })
+      )
+    ),
+
+  update: async (
+    profileId: Id,
+    patch: {
+      displayName?: string;
+      activeJourney?: Journey;
+    }
+  ) => {
+    const revision = ensureProfile(profileId);
+
+    try {
+      return await db.transaction(
+        'rw',
+        [db.profiles, db.journeyProfiles],
+        async () => {
+          if (
+            revision !== sessionRevision ||
+            activeProfileId !== profileId
+          ) {
+            throw new CoreError(
+              'LOCKED',
+              'Profile changed before update'
+            );
+          }
+
+          const old = await db.profiles.get(profileId);
+
+          if (!old) {
+            throw new CoreError(
+              'NOT_FOUND',
+              'Profile not found'
+            );
+          }
+
+          const parsed = profileInputSchema.safeParse({
+            displayName:
+              patch.displayName ?? old.displayName,
+            activeJourney:
+              patch.activeJourney ?? old.activeJourney
+          });
+
+          if (!parsed.success) {
+            throw new CoreError(
+              'VALIDATION',
+              'Profile update failed validation'
+            );
+          }
+
+          const next = {
+            ...old,
+            ...parsed.data,
+            updatedAt: stamp()
+          };
+
+          if (patch.activeJourney) {
+            await activateJourneyState(
+              profileId,
+              patch.activeJourney
+            );
+          }
+
+          await db.profiles.put(next);
+
+          if (
+            revision !== sessionRevision ||
+            activeProfileId !== profileId
+          ) {
+            throw new CoreError(
+              'LOCKED',
+              'Profile changed during update'
+            );
+          }
+
+          return next;
+        }
+      );
+    } catch (e) {
+      if (isQuota(e)) {
+        throw new CoreError(
+          'STORAGE_FULL',
+          'Storage is full'
+        );
+      }
+
+      throw e;
+    }
+  },
+
+  setActive: async (
+    profileId: Id,
+    vault?: {
+      profileId: string;
+      key: CryptoKey | undefined;
+      lastActivity: number;
+      locked: boolean;
+      timer?: ReturnType<typeof setTimeout>;
+    }
+  ) => {
+    const observed = sessionRevision;
+    const p = await db.profiles.get(profileId);
+
+    if (!p) {
+      throw new CoreError(
+        'NOT_FOUND',
+        'Profile not found'
+      );
+    }
+
+    const setting = await db.settings
+      .where('profileId')
+      .equals(profileId)
+      .first();
+
+    if (observed !== sessionRevision) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile context changed while selecting'
+      );
+    }
+
+    if (
+      vault &&
+      (
+        vault.profileId !== profileId ||
+        vault.locked ||
+        !vault.key
+      )
+    ) {
+      throw new CoreError(
+        'LOCKED',
+        'Unlock this profile before selecting it'
+      );
+    }
+
+    if (setting?.pinEnabled && !vault) {
+      throw new CoreError(
+        'LOCKED',
+        'Unlock this profile before selecting it'
+      );
+    }
+
+    if (
+      activeProfileId === profileId &&
+      activeVault === (vault ?? null)
+    ) {
+      return {
+        profile: p,
+        revision: sessionRevision
+      };
+    }
+
+    if (activeVault) {
+      expireVault(activeVault);
+    } else if (activeProfileId) {
+      sessionChannel.invalidate(activeProfileId);
+    }
+
+    activeVault = null;
+    activeProfileId = null;
+    sessionRevision++;
+
+    activeProfileId = profileId;
+    activeVault = vault ?? null;
+
+    if (activeVault) {
+      armAutoLock(activeVault, sessionRevision);
+    }
+
+    return {
+      profile: p,
+      revision: sessionRevision
+    };
+  },
+
+  select: async (
+    profileId: Id
+  ): Promise<PublicProfile> => {
+    const { profile, revision } =
+      await profiles.setActive(profileId);
+
+    if (
+      revision !== sessionRevision ||
+      activeProfileId !== profileId
+    ) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed while selecting'
+      );
+    }
+
+    const isEncrypted =
+      await profileEncryptionStatus(profileId);
+
+    if (
+      revision !== sessionRevision ||
+      activeProfileId !== profileId
+    ) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed while selecting'
+      );
+    }
+
+    return {
+      ...profile,
+      isEncrypted
+    };
+  },
+
+  active: async (): Promise<PublicProfile> => {
+    if (!activeProfileId) {
+      throw new CoreError(
+        'NOT_FOUND',
+        'No active profile'
+      );
+    }
+
+    const profileId = activeProfileId;
+    const revision = ensureProfile(profileId);
+    const p = await db.profiles.get(profileId);
+
+    if (!p) {
+      throw new CoreError(
+        'NOT_FOUND',
+        'Active profile not found'
+      );
+    }
+
+    if (
+      revision !== sessionRevision ||
+      activeProfileId !== profileId
+    ) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed while reading active profile'
+      );
+    }
+
+    const isEncrypted =
+      await profileEncryptionStatus(profileId);
+
+    if (
+      revision !== sessionRevision ||
+      activeProfileId !== profileId
+    ) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed while reading active profile'
+      );
+    }
+
+    return {
+      ...p,
+      isEncrypted
+    };
+  },
+
+  clearActive: (
+    profileId?: string,
+    expectedVault?: object
+  ) => {
+    if (
+      profileId &&
+      activeProfileId !== profileId
+    ) {
+      return;
+    }
+
+    if (
+      expectedVault &&
+      activeVault !== expectedVault
+    ) {
+      return;
+    }
+
+    if (activeVault) {
+      expireVault(activeVault);
+    } else {
+      if (activeProfileId) {
+        sessionChannel.invalidate(activeProfileId);
+      }
+
+      activeProfileId = null;
+      sessionRevision++;
+    }
+  },
+
+  delete: async (profileId: Id) => {
+    const revision = ensureProfile(profileId);
+
+    await db.transaction(
+      'rw',
+      [db.profiles, ...tables()],
+      async () => {
+        if (!(await db.profiles.get(profileId))) {
+          throw new CoreError(
+            'NOT_FOUND',
+            'Profile not found'
+          );
+        }
+
+        for (const t of tables()) {
+          await t
+            .where('profileId')
+            .equals(profileId)
+            .delete();
+        }
+
+        await db.profiles.delete(profileId);
+
+        if (
+          revision !== sessionRevision ||
+          activeProfileId !== profileId
+        ) {
+          throw new CoreError(
+            'LOCKED',
+            'Profile changed during deletion'
+          );
+        }
+      }
+    );
+
+    if (activeProfileId === profileId) {
+      profiles.clearActive();
+    }
+  },
+
+  wipe: async (
+    profileId: Id
+  ): Promise<ProfileWipeResult> => {
+    const wasActive = activeProfileId === profileId;
+
+    const revision = wasActive
+      ? ensureProfile(profileId)
+      : sessionRevision;
+
+    await db.transaction(
+      'rw',
+      [db.profiles, ...tables()],
+      async () => {
+        if (!(await db.profiles.get(profileId))) {
+          throw new CoreError(
+            'NOT_FOUND',
+            'Profile not found'
+          );
+        }
+
+        for (const t of tables()) {
+          await t
+            .where('profileId')
+            .equals(profileId)
+            .delete();
+        }
+
+        const remaining = await Promise.all(
+          tables().map(
+            t => t.where('profileId')
+              .equals(profileId)
+              .count()
+          )
+        );
+
+        if (remaining.some(n => n > 0)) {
+          throw new CoreError(
+            'UNKNOWN',
+            'Profile data wipe was incomplete'
+          );
+        }
+
+        if (
+          revision !== sessionRevision ||
+          (wasActive && activeProfileId !== profileId)
+        ) {
+          throw new CoreError(
+            'LOCKED',
+            'Profile context changed during wipe'
+          );
+        }
+      }
+    );
+
+    if (activeProfileId === profileId) {
+      profiles.clearActive(profileId);
+    } else {
+      sessionChannel.invalidate(profileId);
+    }
+
+    return {
+      profileId,
+      wiped: true
+    };
+  }
+};
+
+export const scoped = {
+  add: async <
+    T extends BaseEntity
+  >(
+    table: Table<T, string>,
+    profileId: Id,
+    value: Omit<
+      T,
+      'id' | 'profileId' | 'createdAt' | 'updatedAt'
+    >
+  ): Promise<T> => {
+    const rev = ensureProfile(profileId);
+    const normalized = validateWrite(table, value);
+
+    const setting = await db.settings
+      .where('profileId')
+      .equals(profileId)
+      .first();
+
+    const time = stamp();
+
+    const row = {
+      ...(normalized as object),
+      id: uuid(),
+      profileId,
+      createdAt: time,
+      updatedAt: time,
+      ...(table.name === 'checkins'
+        ? { loggedAt: time }
+        : {})
+    } as T & { encryptedPayload?: unknown };
+
+    const payload: Record<string, unknown> = {};
+
+    for (const key of [
+      'data',
+      'symptoms',
+      'notes',
+      'conditions',
+      'allergies',
+      'medications',
+      'birthDate',
+      'title',
+      'message',
+      'metadata'
+    ]) {
+      if (key in row) {
+        payload[key] = (
+          row as unknown as Record<string, unknown>
+        )[key];
+
+        delete (
+          row as unknown as Record<string, unknown>
+        )[key];
+      }
+    }
+
+    if (setting?.pinEnabled) {
+      if (!activeVault?.key) {
+        throw new CoreError(
+          'LOCKED',
+          'Unlock this profile to write health data'
+        );
+      }
+
+      const meta = {
+        profileId,
+        id: row.id,
+        journey:
+          'journey' in row
+            ? String(row.journey)
+            : '',
+        type:
+          'type' in row
+            ? String(row.type)
+            : '',
+        updatedAt: row.updatedAt
+      };
+
+      row.encryptedPayload = await encryptPayload(
+        activeVault.key,
+        payload,
+        meta
+      );
+    } else {
+      Object.assign(row, payload);
+    }
+
+    if (
+      rev !== sessionRevision ||
+      activeProfileId !== profileId
+    ) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed during write'
+      );
+    }
+
+    try {
+      await db.transaction(
+        'rw',
+        table,
+        async () => {
+          if (
+            rev !== sessionRevision ||
+            activeProfileId !== profileId
+          ) {
+            throw new CoreError(
+              'LOCKED',
+              'Profile changed during write'
+            );
+          }
+
+          await table.add(row);
+
+          if (
+            rev !== sessionRevision ||
+            activeProfileId !== profileId
+          ) {
+            throw new CoreError(
+              'LOCKED',
+              'Profile changed during write'
+            );
+          }
+        }
+      );
+
+      return await scoped.get(
+        table,
+        profileId,
+        row.id
+      );
+    } catch (e) {
+      if (isQuota(e)) {
+        throw new CoreError(
+          'STORAGE_FULL',
+          'Storage is full'
+        );
+      }
+
+      throw e;
+    }
+  },
+
+  list: async <
+    T extends BaseEntity
+  >(
+    table: Table<T, string>,
+    profileId: Id
+  ): Promise<T[]> => {
+    const rev = ensureProfile(profileId);
+
+    const setting = await db.settings
+      .where('profileId')
+      .equals(profileId)
+      .first();
+
+    if (setting?.pinEnabled && !activeVault?.key) {
+      throw new CoreError(
+        'LOCKED',
+        'Unlock this profile to read health data'
+      );
+    }
+
+    const rows = await table
+      .where('profileId')
+      .equals(profileId)
+      .toArray();
+
+    if (rev !== sessionRevision) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed during read'
+      );
+    }
+
+    const decoded = await Promise.all(
+      rows.map(r => scoped.decode(r, setting))
+    );
+
+    if (rev !== sessionRevision) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed during read'
+      );
+    }
+
+    return decoded;
+  },
+
+  decode: async <
+    T extends BaseEntity
+  >(
+    row: T,
+    setting?: Settings
+  ): Promise<T> => {
+    const revision = sessionRevision;
+
+    const stored = row as T & {
+      encryptedPayload?: {
+        iv: number[];
+        cipher: number[];
+      };
+    };
+
+    const sensitive = [
+      'data',
+      'symptoms',
+      'notes',
+      'conditions',
+      'allergies',
+      'medications',
+      'birthDate',
+      'title',
+      'message',
+      'metadata'
+    ];
+
+    if (
+      stored.encryptedPayload &&
+      !setting?.pinEnabled
+    ) {
+      throw new CoreError(
+        'CRYPTO',
+        'Record encryption metadata is inconsistent'
+      );
+    }
+
+    if (!stored.encryptedPayload) {
+      if (
+        setting?.pinEnabled &&
+        sensitive.some(k => k in (row as object))
+      ) {
+        throw new CoreError(
+          'CRYPTO',
+          'Protected record is stored without encryption'
+        );
+      }
+
+      return row;
+    }
+
+    if (
+      !activeVault?.key ||
+      activeVault.profileId !== row.profileId
+    ) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile is locked'
+      );
+    }
+
+    try {
+      const meta = {
+        profileId: row.profileId,
+        id: row.id,
+        journey:
+          'journey' in row
+            ? String(
+                (
+                  row as T & {
+                    journey?: string;
+                  }
+                ).journey ?? ''
+              )
+            : '',
+        type:
+          'type' in row
+            ? String(
+                (
+                  row as T & {
+                    type?: string;
+                  }
+                ).type ?? ''
+              )
+            : '',
+        updatedAt: row.updatedAt
+      };
+
+      const payload = await decryptPayload(
+        activeVault.key,
+        stored.encryptedPayload,
+        meta
+      );
+
+      if (
+        revision !== sessionRevision ||
+        activeProfileId !== row.profileId
+      ) {
+        throw new CoreError(
+          'LOCKED',
+          'Profile changed during decryption'
+        );
+      }
+
+      delete stored.encryptedPayload;
+
+      return Object.assign(row, payload);
+    } catch (e) {
+      if (e instanceof CoreError) throw e;
+
+      throw new CoreError(
+        'CRYPTO',
+        'Encrypted record could not be authenticated'
+      );
+    }
+  },
+
+  get: async <
+    T extends BaseEntity
+  >(
+    table: Table<T, string>,
+    profileId: Id,
+    id: string
+  ): Promise<T> => {
+    const rev = ensureProfile(profileId);
+
+    const setting = await db.settings
+      .where('profileId')
+      .equals(profileId)
+      .first();
+
+    const row = await table.get(id);
+
+    if (!row || row.profileId !== profileId) {
+      throw new CoreError(
+        'NOT_FOUND',
+        'Record not found'
+      );
+    }
+
+    if (rev !== sessionRevision) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed during read'
+      );
+    }
+
+    const decoded = await scoped.decode(row, setting);
+
+    if (rev !== sessionRevision) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed during read'
+      );
+    }
+
+    return decoded;
+  },
+
+  update: async <
+    T extends BaseEntity
+  >(
+    table: Table<T, string>,
+    profileId: Id,
+    id: string,
+    patch: Partial<T>
+  ): Promise<T> => {
+    const revision = ensureProfile(profileId);
+
+    const current = await scoped.get(
+      table,
+      profileId,
+      id
+    );
+
+    const next = {
+      ...current,
+      ...patch,
+      id,
+      profileId,
+      createdAt: current.createdAt,
+      updatedAt: stamp(),
+      ...(table.name === 'checkins'
+        ? {
+            loggedAt: (
+              current as T & {
+                loggedAt?: string;
+              }
+            ).loggedAt
+          }
+        : {})
+    } as T & { encryptedPayload?: unknown };
+
+    const setting = await db.settings
+      .where('profileId')
+      .equals(profileId)
+      .first();
+
+    const payload: Record<string, unknown> = {};
+
+    for (const key of [
+      'data',
+      'symptoms',
+      'notes',
+      'conditions',
+      'allergies',
+      'medications',
+      'birthDate',
+      'title',
+      'message',
+      'metadata'
+    ]) {
+      if (key in next) {
+        payload[key] = (
+          next as unknown as Record<string, unknown>
+        )[key];
+
+        delete (
+          next as unknown as Record<string, unknown>
+        )[key];
+      }
+    }
+
+    const writable = {
+      ...next
+    } as Record<string, unknown>;
+
+    for (const key of [
+      'id',
+      'profileId',
+      'createdAt',
+      'updatedAt',
+      'loggedAt',
+      'encryptedPayload'
+    ]) {
+      delete writable[key];
+    }
+
+    Object.assign(writable, payload);
+
+    const normalized = validateWrite(
+      table,
+      writable
+    );
+
+    Object.assign(next, normalized);
+
+    if (setting?.pinEnabled) {
+      if (!activeVault?.key) {
+        throw new CoreError(
+          'LOCKED',
+          'Unlock this profile to update health data'
+        );
+      }
+
+      for (const key of Object.keys(payload)) {
+        delete (
+          next as unknown as Record<string, unknown>
+        )[key];
+      }
+
+      const meta = {
+        profileId,
+        id,
+        journey:
+          'journey' in next
+            ? String(next.journey)
+            : '',
+        type:
+          'type' in next
+            ? String(next.type)
+            : '',
+        updatedAt: next.updatedAt
+      };
+
+      next.encryptedPayload = await encryptPayload(
+        activeVault.key,
+        payload,
+        meta
+      );
+    } else {
+      Object.assign(next, payload);
+    }
+
+    try {
+      await db.transaction(
+        'rw',
+        table,
+        async () => {
+          if (
+            revision !== sessionRevision ||
+            activeProfileId !== profileId
+          ) {
+            throw new CoreError(
+              'LOCKED',
+              'Profile changed during update'
+            );
+          }
+
+          await table.put(next);
+
+          if (
+            revision !== sessionRevision ||
+            activeProfileId !== profileId
+          ) {
+            throw new CoreError(
+              'LOCKED',
+              'Profile changed during update'
+            );
+          }
+        }
+      );
+
+      return await scoped.get(
+        table,
+        profileId,
+        id
+      );
+    } catch (e) {
+      if (isQuota(e)) {
+        throw new CoreError(
+          'STORAGE_FULL',
+          'Storage is full'
+        );
+      }
+
+      throw e;
+    }
+  },
+
+  delete: async <
+    T extends BaseEntity
+  >(
+    table: Table<T, string>,
+    profileId: Id,
+    id: string
+  ) => {
+    const revision = ensureProfile(profileId);
+
+    await scoped.get(table, profileId, id);
+
+    await db.transaction(
+      'rw',
+      table,
+      async () => {
+        if (
+          revision !== sessionRevision ||
+          activeProfileId !== profileId
+        ) {
+          throw new CoreError(
+            'LOCKED',
+            'Profile changed during delete'
+          );
+        }
+
+        const row = await table.get(id);
+
+        if (!row || row.profileId !== profileId) {
+          throw new CoreError(
+            'NOT_FOUND',
+            'Record not found'
+          );
+        }
+
+        await table.delete(id);
+      }
+    );
+  },
+
+  byJourney: async <
+    T extends BaseEntity & { journey: string }
+  >(
+    table: Table<T, string>,
+    profileId: Id,
+    journey: string
+  ) => {
+    if (
+      !table.schema.indexes.some(
+        i => i.name === '[profileId+journey]'
+      )
+    ) {
+      return (
+        await scoped.list(table, profileId)
+      ).filter(r => r.journey === journey);
+    }
+
+    const revision = ensureProfile(profileId);
+
+    const settings = await db.settings
+      .where('profileId')
+      .equals(profileId)
+      .first();
+
+    const rows = await table
+      .where('[profileId+journey]')
+      .equals([profileId, journey])
+      .toArray();
+
+    const items = await Promise.all(
+      rows.map(r => scoped.decode(r, settings))
+    );
+
+    if (revision !== sessionRevision) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed during query'
+      );
+    }
+
+    return items;
+  },
+
+  byType: async <
+    T extends BaseEntity & { type: string }
+  >(
+    table: Table<T, string>,
+    profileId: Id,
+    type: string,
+    journey?: string
+  ) => {
+    if (
+      journey &&
+      table.schema.indexes.some(
+        i => i.name === '[profileId+journey+type]'
+      )
+    ) {
+      const revision = ensureProfile(profileId);
+
+      const settings = await db.settings
+        .where('profileId')
+        .equals(profileId)
+        .first();
+
+      const rows = await table
+        .where('[profileId+journey+type]')
+        .equals([profileId, journey, type])
+        .toArray();
+
+      const items = await Promise.all(
+        rows.map(r => scoped.decode(r, settings))
+      );
+
+      if (revision !== sessionRevision) {
+        throw new CoreError(
+          'LOCKED',
+          'Profile changed during type query'
+        );
+      }
+
+      return items;
+    }
+
+    return (
+      await scoped.list(table, profileId)
+    ).filter(
+      r =>
+        r.type === type &&
+        (
+          !journey ||
+          (
+            r as T & {
+              journey?: string;
+            }
+          ).journey === journey
+        )
+    );
+  },
+
+  byDate: async <
+    T extends BaseEntity & { date?: string }
+  >(
+    table: Table<T, string>,
+    profileId: Id,
+    start: string,
+    end: string
+  ) => {
+    if (
+      !isoDateSchema.safeParse(start).success ||
+      !isoDateSchema.safeParse(end).success ||
+      start > end
+    ) {
+      throw new CoreError(
+        'VALIDATION',
+        'Date range is invalid'
+      );
+    }
+
+    const dateIndex = table.schema.indexes.some(
+      i => i.name === '[profileId+date]'
+    );
+
+    const timeIndex = table.schema.indexes.some(
+      i => i.name === '[profileId+dateTime]'
+    );
+
+    if (!dateIndex && !timeIndex) {
+      return (
+        await scoped.list(table, profileId)
+      ).filter(
+        r =>
+          r.date !== undefined &&
+          r.date >= start &&
+          r.date <= end
+      );
+    }
+
+    const revision = ensureProfile(profileId);
+
+    const settings = await db.settings
+      .where('profileId')
+      .equals(profileId)
+      .first();
+
+    const rows = dateIndex
+      ? await table
+          .where('[profileId+date]')
+          .between(
+            [profileId, start],
+            [profileId, end],
+            true,
+            true
+          )
+          .toArray()
+      : await table
+          .where('[profileId+dateTime]')
+          .between(
+            [
+              profileId,
+              `${start}T00:00:00.000Z`
+            ],
+            [
+              profileId,
+              `${end}T23:59:59.999Z`
+            ],
+            true,
+            true
+          )
+          .toArray();
+
+    const items = await Promise.all(
+      rows.map(r => scoped.decode(r, settings))
+    );
+
+    if (revision !== sessionRevision) {
+      throw new CoreError(
+        'LOCKED',
+        'Profile changed during date query'
+      );
+    }
+
+    return items;
+  }
+};
+
+export function repository<
+  T extends BaseEntity
+>(table: Table<T, string>) {
+  return {
+    create: (
+      profileId: string,
+      value: Omit<
+        T,
+        'id' | 'profileId' | 'createdAt' | 'updatedAt'
+      >
+    ) => scoped.add(table, profileId, value),
+
+    get: (profileId: string, id: string) =>
+      scoped.get(table, profileId, id),
+
+    list: (profileId: string) =>
+      scoped.list(table, profileId),
+
+    update: (
+      profileId: string,
+      id: string,
+      patch: Partial<T>
+    ) => scoped.update(table, profileId, id, patch),
+
+    delete: (profileId: string, id: string) =>
+      scoped.delete(table, profileId, id),
+
+    byJourney: (
+      profileId: string,
+      journey: string
+    ) =>
+      scoped.byJourney(
+        table as Table<T & { journey: string }, string>,
+        profileId,
+        journey
+      ),
+
+    byType: (
+      profileId: string,
+      type: string,
+      journey?: string
+    ) =>
+      scoped.byType(
+        table as Table<T & { type: string }, string>,
+        profileId,
+        type,
+        journey
+      ),
+
+    byDate: (
+      profileId: string,
+      start: string,
+      end: string
+    ) =>
+      scoped.byDate(
+        table as Table<T & { date?: string }, string>,
+        profileId,
+        start,
+        end
+      )
+  };
+}
+
+export const dataRepositories = {
+  healthProfile: repository(db.healthProfile),
+  journeyProfiles: repository(db.journeyProfiles),
+  checkins: repository(db.checkins),
+  records: repository(db.records),
+  appointments: repository(db.appointments),
+  notifications: repository(db.notifications),
+  bookmarks: repository(db.bookmarks),
+  recentlyViewed: repository(db.recentlyViewed),
+  consents: repository(db.consents)
+};
+
+export async function getSettings(profileId: string) {
+  return db.settings
+    .where('profileId')
+    .equals(profileId)
+    .first();
+}
+
+export function captureProfileRevision(profileId: string) {
+  return ensureProfile(profileId);
+}
+
+export function assertProfileRevision(
+  profileId: string,
+  revision: number
+) {
+  if (
+    revision !== sessionRevision ||
+    activeProfileId !== profileId
+  ) {
+    throw new CoreError(
+      'LOCKED',
+      'Profile context changed during operation'
+    );
+  }
+
+  return ensureProfile(profileId);
+}
+
+export async function saveSecuritySettings(
+  setting: Settings,
+  key: CryptoKey
+) {
+  let revision = ensureProfile(setting.profileId);
+
+  if (!(await db.profiles.get(setting.profileId))) {
+    throw new CoreError(
+      'NOT_FOUND',
+      'Profile not found'
+    );
+  }
+
+  if (!settingsInputSchema.safeParse(setting).success) {
+    throw new CoreError(
+      'VALIDATION',
+      'Security settings failed validation'
+    );
+  }
+
+  const old = await db.settings.get(setting.id);
+
+  if (old?.pinEnabled) {
+    throw new CoreError(
+      'CONFLICT',
+      'PIN protection is already configured'
+    );
+  }
+
+  if (
+    revision !== sessionRevision ||
+    activeProfileId !== setting.profileId
+  ) {
+    throw new CoreError(
+      'LOCKED',
+      'Profile changed while enabling protection'
+    );
+  }
+
+  profiles.clearActive(setting.profileId);
+  revision = sessionRevision;
+
+  const sensitive = [
+    'data',
+    'symptoms',
+    'notes',
+    'conditions',
+    'allergies',
+    'medications',
+    'birthDate',
+    'title',
+    'message',
+    'metadata'
+  ];
+
+  const staged: {
+    table: Table<BaseEntity, string>;
+    before: BaseEntity & Record<string, unknown>;
+    after: BaseEntity & Record<string, unknown>;
+  }[] = [];
+
+  for (const table of tables()) {
+    if (table.name === 'settings') continue;
+
+    for (
+      const raw of await table
+        .where('profileId')
+        .equals(setting.profileId)
+        .toArray()
+    ) {
+      const before = raw as BaseEntity &
+        Record<string, unknown>;
+
+      const after = { ...before };
+
+      if (after.encryptedPayload) continue;
+
+      const payload: Record<string, unknown> = {};
+
+      for (const k of sensitive) {
+        if (k in after) {
+          payload[k] = after[k];
+          delete after[k];
+        }
+      }
+
+      if (Object.keys(payload).length) {
+        const meta = {
+          profileId: after.profileId,
+          id: after.id,
+          journey:
+            'journey' in after
+              ? String(after.journey)
+              : '',
+          type:
+            'type' in after
+              ? String(after.type)
+              : '',
+          updatedAt: after.updatedAt
+        };
+
+        after.encryptedPayload = await encryptPayload(
+          key,
+          payload,
+          meta
+        );
+
+        staged.push({
+          table,
+          before,
+          after
+        });
+      }
+    }
+  }
+
+  if (revision !== sessionRevision) {
+    throw new CoreError(
+      'LOCKED',
+      'Profile changed while enabling protection'
+    );
+  }
+
+  try {
+    await db.transaction(
+      'rw',
+      [db.settings, ...tables()],
+      async () => {
+        for (const item of staged) {
+          const current = await item.table.get(
+            item.before.id
+          );
+
+          if (
+            !current ||
+            current.profileId !== setting.profileId ||
+            current.updatedAt !== item.before.updatedAt ||
+            (
+              current as BaseEntity & {
+                encryptedPayload?: unknown;
+              }
+            ).encryptedPayload
+          ) {
+            throw new CoreError(
+              'CONFLICT',
+              'Profile data changed while enabling protection'
+            );
+          }
+
+          await item.table.put(item.after);
+        }
+
+        if (revision !== sessionRevision) {
+          throw new CoreError(
+            'LOCKED',
+            'Profile changed while enabling protection'
+          );
+        }
+
+        await db.settings.put(setting);
+      }
+    );
+  } catch (e) {
+    if (isQuota(e)) {
+      throw new CoreError(
+        'STORAGE_FULL',
+        'Storage is full'
+      );
+    }
+
+    throw e;
+  }
+}
+
+export async function snapshotProfile(profileId: string) {
+  const revision = ensureProfile(profileId);
+
+  return db.transaction(
+    'r',
+    [db.profiles, ...tables()],
+    async () => {
+      if (
+        revision !== sessionRevision ||
+        activeProfileId !== profileId
+      ) {
+        throw new CoreError(
+          'LOCKED',
+          'Profile changed before backup'
+        );
+      }
+
+      const profile = await db.profiles.get(profileId);
+
+      if (!profile) {
+        throw new CoreError(
+          'NOT_FOUND',
+          'Profile not found'
+        );
+      }
+
+      const result: Record<string, unknown[]> = {
+        profiles: [profile]
+      };
+
+      for (const table of tables()) {
+        result[table.name] = await table
+          .where('profileId')
+          .equals(profileId)
+          .toArray();
+      }
+
+      if (
+        revision !== sessionRevision ||
+        activeProfileId !== profileId
+      ) {
+        throw new CoreError(
+          'LOCKED',
+          'Profile changed during backup'
+        );
+      }
+
+      return result;
+    }
+  );
+}
+
+export async function restoreProfile(
+  profileId: string,
+  data: Record<string, unknown[]>
+) {
+  const revision = ensureProfile(profileId);
+
+  const names = [
+    'healthProfile',
+    'journeyProfiles',
+    'checkins',
+    'records',
+    'appointments',
+    'notifications',
+    'bookmarks',
+    'recentlyViewed',
+    'consents',
+    'settings'
+  ];
+
+  await db.transaction(
+    'rw',
+    [db.profiles, ...tables()],
+    async () => {
+      if (!(await db.profiles.get(profileId))) {
+        throw new CoreError(
+          'NOT_FOUND',
+          'Profile not found'
+        );
+      }
+
+      for (const name of names) {
+        for (const raw of data[name] ?? []) {
+          const row = raw as {
+            id?: string;
+            profileId?: string;
+          };
+
+          if (
+            !row.id ||
+            row.profileId !== profileId
+          ) {
+            throw new CoreError(
+              'VALIDATION',
+              'Backup contains invalid or cross-profile record'
+            );
+          }
+
+          const parsed =
+            databaseRowSchemas[name]?.safeParse(raw);
+
+          if (!parsed?.success) {
+            throw new CoreError(
+              'VALIDATION',
+              'Backup record failed validation'
+            );
+          }
+
+          const normalized = parsed.data as {
+            id: string;
+            profileId: string;
+          };
+
+          const table = db.table(name);
+          const existing = await table.get(normalized.id);
+
+          if (existing) {
+            if (
+              JSON.stringify(existing) !==
+              JSON.stringify(normalized)
+            ) {
+              throw new CoreError(
+                'CONFLICT',
+                'Backup conflicts with an existing record'
+              );
+            }
+
+            continue;
+          }
+
+          await table.put(normalized);
+        }
+      }
+
+      if (
+        revision !== sessionRevision ||
+        activeProfileId !== profileId
+      ) {
+        throw new CoreError(
+          'LOCKED',
+          'Profile context changed during restore'
+        );
+      }
+    }
+  );
+
+  if ((await getSettings(profileId))?.pinEnabled) {
+    profiles.clearActive(profileId);
+  }
+}
+
+export async function addRecord(
+  profileId: string,
+  journey: 'menstrual' | 'maternity' | 'menopause',
+  type: string,
+  data: Record<string, unknown>
+) {
+  return scoped.add(db.records, profileId, {
+    journey,
+    type,
+    data
+  });
+}
+
+export async function addAppointment(
+  profileId: string,
+  journey: Journey,
+  value: {
+    dateTime: string;
+    title: string;
+    notes?: string;
+  }
+) {
+  const parsed = validateWrite(
+    db.appointments,
+    { ...value, journey }
+  );
+
+  return scoped.add(
+    db.appointments,
+    profileId,
+    parsed as Omit<
+      Appointment,
+      'id' | 'profileId' | 'createdAt' | 'updatedAt'
+    >
+  );
+}
+
+export async function saveHealthProfile(
+  profileId: string,
+  value: Omit<
+    HealthProfile,
+    'id' | 'profileId' | 'createdAt' | 'updatedAt'
+  >
+) {
+  return scoped.add(
+    db.healthProfile,
+    profileId,
+    value
+  );
+}
+
+export async function listRecords(
+  profileId: string,
+  journey?: Journey
+) {
+  return (
+    await scoped.list(db.records, profileId)
+  ).filter(
+    r => !journey || r.journey === journey
+  );
+}
+
+export async function deleteRecord(
+  profileId: string,
+  id: string
+) {
+  const row = await scoped.get(
+    db.records,
+    profileId,
+    id
+  );
+
+  await scoped.delete(
+    db.records,
+    profileId,
+    id
+  );
+
+  return row;
+}
+
+export type {
+  StoragePersistenceStatus
+} from '../core/contracts';
+
+let lastStoragePersistenceStatus: StoragePersistenceStatus = {
+  state: 'unsupported',
+  supported: false,
+  granted: false
+};
+
+export async function requestStoragePersistenceStatus(): Promise<StoragePersistenceStatus> {
+  try {
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.storage?.persist
+    ) {
+      lastStoragePersistenceStatus = {
+        state: 'unsupported',
+        supported: false,
+        granted: false
+      };
+
+      return lastStoragePersistenceStatus;
+    }
+
+    const granted = await navigator.storage.persist();
+
+    lastStoragePersistenceStatus = {
+      state: granted ? 'granted' : 'denied',
+      supported: true,
+      granted
+    };
+
+    return lastStoragePersistenceStatus;
+  } catch {
+    lastStoragePersistenceStatus = {
+      state: 'error',
+      supported: true,
+      granted: false
+    };
+
+    return lastStoragePersistenceStatus;
+  }
+}
+
+export async function requestStoragePersistence() {
+  return (
+    await requestStoragePersistenceStatus()
+  ).granted;
+}
+
+export async function getStoragePersistenceDetails(): Promise<StoragePersistenceStatus> {
+  try {
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.storage?.persisted
+    ) {
+      lastStoragePersistenceStatus = {
+        state: 'unsupported',
+        supported: false,
+        granted: false
+      };
+
+      return lastStoragePersistenceStatus;
+    }
+
+    const granted = await navigator.storage.persisted();
+
+    lastStoragePersistenceStatus = {
+      state: granted ? 'granted' : 'denied',
+      supported: true,
+      granted
+    };
+
+    return lastStoragePersistenceStatus;
+  } catch {
+    lastStoragePersistenceStatus = {
+      state: 'error',
+      supported: true,
+      granted: false
+    };
+
+    return lastStoragePersistenceStatus;
+  }
+}
+
+export async function getStoragePersistenceStatus() {
+  return (
+    await getStoragePersistenceDetails()
+  ).granted;
+}
+
+/*
+ * Postpartum transition implementation.
+ *
+ * This is the single implementation used by journeys.markPostpartum.
+ * It preserves the profile-lock checks, encryption, and optimistic
+ * concurrency checks from the original implementation.
+ */
+async function markPostpartumEncrypted(
+  profileId: string,
+  startedAt: string
+) {
+  if (!isoDateSchema.safeParse(startedAt).success) {
+    throw new CoreError(
+      'VALIDATION',
+      'Postpartum date is invalid'
+    );
+  }
+
+  const revision = ensureProfile(profileId);
+  const setting = await getSettings(profileId);
+
+  if (
+    setting?.pinEnabled &&
+    (
+      !activeVault?.key ||
+      activeVault.profileId !== profileId
+    )
+  ) {
+    throw new CoreError(
+      'LOCKED',
+      'Unlock this profile before changing maternity state'
+    );
+  }
+
+  const stored = (
+    await db.journeyProfiles
+      .where({
+        profileId,
+        journey: 'maternity'
+      })
+      .toArray()
+  ).find(r => r.status === 'active');
+
+  let state = stored
+    ? await scoped.decode({ ...stored }, setting)
+    : undefined;
+
+  if (state?.metadata?.stage === 'postpartum') {
+    return {
+      changed: false,
+      state
+    };
+  }
+
+  const now = stamp();
+
+  state = state ?? {
+    id: uuid(),
+    profileId,
+    journey: 'maternity',
+    status: 'active' as const,
+    startedAt,
+    metadata: {},
+    createdAt: now,
+    updatedAt: now
+  };
+
+  state.metadata = {
+    ...state.metadata,
+    stage: 'postpartum',
+    postpartumStartedAt: startedAt
+  };
+
+  state.updatedAt = now;
+
+  const before = stored?.updatedAt;
+
+  if (setting?.pinEnabled) {
+    const payload = {
+      metadata: state.metadata
+    };
+
+    delete (
+      state as JourneyProfile & {
+        encryptedPayload?: unknown;
+      }
+    ).metadata;
+
+    const meta = {
+      profileId,
+      id: state.id,
+      journey: 'maternity',
+      type: '',
+      updatedAt: state.updatedAt
+    };
+
+    (
+      state as JourneyProfile & {
+        encryptedPayload?: unknown;
+      }
+    ).encryptedPayload = await encryptPayload(
+      activeVault!.key!,
+      payload,
+      meta
+    );
+  }
+
+  const profile = await db.profiles.get(profileId);
+
+  if (!profile) {
+    throw new CoreError(
+      'NOT_FOUND',
+      'Profile not found'
+    );
+  }
+
+  profile.activeJourney = 'maternity';
+  profile.updatedAt = now;
+
+  await db.transaction(
+    'rw',
+    [db.profiles, db.journeyProfiles],
+    async () => {
+      if (
+        revision !== sessionRevision ||
+        activeProfileId !== profileId
+      ) {
+        throw new CoreError(
+          'LOCKED',
+          'Profile changed during transition'
+        );
+      }
+
+      const latest = stored
+        ? await db.journeyProfiles.get(stored.id)
+        : undefined;
+
+      if (
+        stored &&
+        (
+          !latest ||
+          latest.updatedAt !== before
+        )
+      ) {
+        throw new CoreError(
+          'CONFLICT',
+          'Maternity state changed during transition'
+        );
+      }
+
+      await db.journeyProfiles.put(state!);
+      await db.profiles.put(profile);
+
+      if (revision !== sessionRevision) {
+        throw new CoreError(
+          'LOCKED',
+          'Profile changed during transition'
+        );
+      }
+    }
+  );
+
+  return {
+    changed: true,
+    state: setting?.pinEnabled
+      ? await scoped.decode({ ...state! }, setting)
+      : state
+  };
+}
+
+/*
+ * The public journeys object exposes the one implementation above.
+ * There is no second, non-encryption-aware implementation.
+ */
+export const journeys = {
+  activate: async (
+    profileId: string,
+    journey: 'menstrual' | 'maternity' | 'menopause'
+  ) => {
+    if (!journeySchema.safeParse(journey).success) {
+      throw new CoreError(
+        'VALIDATION',
+        'Journey is invalid'
+      );
+    }
+
+    const revision = ensureProfile(profileId);
+
+    return db.transaction(
+      'rw',
+      [db.profiles, db.journeyProfiles],
+      async () => {
+        const p = await db.profiles.get(profileId);
+
+        if (!p) {
+          throw new CoreError(
+            'NOT_FOUND',
+            'Profile not found'
+          );
+        }
+
+        const current = await activateJourneyState(
+          profileId,
+          journey
+        );
+
+        p.activeJourney = journey;
+        p.updatedAt = stamp();
+
+        await db.profiles.put(p);
+
+        if (revision !== sessionRevision) {
+          throw new CoreError(
+            'LOCKED',
+            'Profile changed during journey switch'
+          );
+        }
+
+        return current;
+      }
+    );
+  },
+
+  markPostpartum: markPostpartumEncrypted
+};
+
+export const addCheckIn = (
+  profileId: string,
+  input: Omit<
+    CheckIn,
+    'id' | 'profileId' | 'createdAt' | 'updatedAt'
+  >
+) => scoped.add(db.checkins, profileId, input);
+
+export const listCheckIns = (
+  profileId: string,
+  journey?: Journey
+) =>
+  scoped.list(db.checkins, profileId).then(
+    rows =>
+      rows.filter(
+        r => !journey || r.journey === journey
+      )
+  );
+
+export const listJourneyProfiles = (
+  profileId: string
+) => scoped.list(db.journeyProfiles, profileId);
+
+export const deleteCheckIn = (
+  profileId: string,
+  id: string
+) => scoped.delete(db.checkins, profileId, id);
+
+/**
+ * Seeds conspicuously synthetic demo rows.
+ * These values are not health guidance or user data.
+ */
+export const sampleData = {
+  load: async (profileId: string) => {
+    const date = new Date()
+      .toISOString()
+      .slice(0, 10);
+
+    const existingChecks = await scoped.list(
+      db.checkins,
+      profileId
+    );
+
+    const existingRecords = await scoped.list(
+      db.records,
+      profileId
+    );
+
+    let created = 0;
+
+    for (
+      const journey of [
+        'menstrual',
+        'maternity',
+        'menopause'
+      ] as const
+    ) {
+      if (
+        !existingChecks.some(
+          row =>
+            row.isSample === true &&
+            row.journey === journey
+        )
+      ) {
+        await scoped.add(db.checkins, profileId, {
+          journey,
+          date,
+          kind: 'demo',
+          symptoms: [],
+          data: {
+            demoLabel: 'Synthetic demonstration only'
+          },
+          isSample: true
+        });
+
+        created++;
+      }
+
+      if (
+        !existingRecords.some(
+          row =>
+            row.isSample === true &&
+            row.journey === journey
+        )
+      ) {
+        await scoped.add(db.records, profileId, {
+          journey,
+          type: 'demo',
+          date,
+          title: 'Synthetic example',
+          data: {
+            demoLabel: 'Synthetic demonstration only'
+          },
+          isSample: true
+        });
+
+        created++;
+      }
+    }
+
+    return {
+      created,
+      isSample: true as const
+    };
+  },
+
+  reset: async (profileId: string) => {
+    let deleted = 0;
+
+    for (
+      const table of [
+        db.checkins,
+        db.records,
+        db.appointments,
+        db.notifications,
+        db.bookmarks,
+        db.recentlyViewed,
+        db.consents
+      ] as Table<BaseEntity, string>[]
+    ) {
+      for (
+        const row of await scoped.list(
+          table,
+          profileId
+        )
+      ) {
+        if (
+          (
+            row as BaseEntity & {
+              isSample?: boolean;
+            }
+          ).isSample === true
+        ) {
+          await scoped.delete(
+            table,
+            profileId,
+            row.id
+          );
+
+          deleted++;
+        }
+      }
+    }
+
+    return { deleted };
+  }
+};
