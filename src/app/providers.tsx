@@ -15,6 +15,7 @@ import {
   MENSTRUAL_PERSONA_ID,
   MATERNITY_PERSONA_ID,
   MENOPAUSE_PERSONA_ID,
+  DEFAULT_DEMO_PROFILES,
 } from "../data/fakeDatasets";
 import { db } from "../data/db";
 
@@ -23,7 +24,7 @@ interface AppContextValue {
   activeProfile: LocalProfile | null;
   theme: Theme;
   setTheme: (theme: Theme) => void;
-  createProfile: (nickname: string) => LocalProfile | null;
+  createProfile: (nickname: string, journey?: "menstrual" | "maternity" | "menopause") => LocalProfile | null;
   selectProfile: (profileId: string) => void;
   clearActiveProfile: () => void;
   deleteProfile: (profileId: string) => void;
@@ -33,32 +34,7 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
-export const DEFAULT_DEMO_PROFILES: LocalProfile[] = [
-  {
-    id: MENSTRUAL_PERSONA_ID,
-    nickname: "Priya (Menstrual Demo)",
-    avatarColor: "#C77D88",
-    journey: "menstrual",
-    createdAt: "2026-08-15T08:00:00.000Z",
-    isSample: true,
-  },
-  {
-    id: MATERNITY_PERSONA_ID,
-    nickname: "Aria (Maternity Demo)",
-    avatarColor: "#8C9B83",
-    journey: "maternity",
-    createdAt: "2026-06-01T08:00:00.000Z",
-    isSample: true,
-  },
-  {
-    id: MENOPAUSE_PERSONA_ID,
-    nickname: "Elena (Menopause Demo)",
-    avatarColor: "#B69BC8",
-    journey: "menopause",
-    createdAt: "2026-05-10T08:00:00.000Z",
-    isSample: true,
-  },
-];
+export { DEFAULT_DEMO_PROFILES };
 
 export function AppProviders({ children }: { children: ReactNode }) {
   const [profiles, setProfiles] = useState<LocalProfile[]>(() =>
@@ -84,7 +60,10 @@ export function AppProviders({ children }: { children: ReactNode }) {
     [profiles, activeProfileId],
   );
 
-  function createProfile(nickname: string): LocalProfile | null {
+  function createProfile(
+    nickname: string,
+    journey?: "menstrual" | "maternity" | "menopause"
+  ): LocalProfile | null {
     const cleanNickname = nickname.trim();
 
     if (!cleanNickname) return null;
@@ -92,6 +71,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
     const profile: LocalProfile = {
       id: createId(),
       nickname: cleanNickname.slice(0, 32),
+      journey,
       avatarColor: ["#C77D88", "#8C9B83", "#B69BC8", "#D2A56F"][
         profiles.length % 4
       ],

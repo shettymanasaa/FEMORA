@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import PageHeader from "../../ui/common/PageHeader";
 import { useAppContext } from "../../app/providers";
+import { coreApi } from "../../data/public";
 
 type SavedCheckIn = {
   id: string;
@@ -96,6 +97,14 @@ export default function CheckInPage() {
       };
 
       localStorage.setItem(key, JSON.stringify([entry, ...current]));
+      coreApi.saveMenstrualCheckIn(profileId, {
+        date,
+        kind: symptoms.some(s => s.toLowerCase().includes("period")) ? "period_start" : "daily",
+        symptoms: symptoms.map(s => ({
+          code: s.toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 30),
+          severity: Math.max(1, Math.min(10, Number(pain) || 1)),
+        })),
+      }).catch(() => {});
       setSuccess("Your check-in has been saved to this profile on this device.");
       setSymptoms([]);
       setMood("");

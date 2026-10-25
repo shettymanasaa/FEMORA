@@ -61,9 +61,9 @@ export default function ProfilePickerPage() {
 
       <div className="standalone-content">
         <PageHeader
-          eyebrow="LOCAL-FIRST SECURE LOG IN"
-          title="Who is entering FEMORA today?"
-          description="Select an existing profile, log in with an evaluation demo dataset, or create a new personal space."
+          eyebrow="PROFILE SOCKET • ONLY PROFILE REQUIRED"
+          title="Connect your profile socket"
+          description="FEMORA is 100% local-first. Only your profile is required to log in — no passwords, emails, or cloud accounts."
         />
 
         {/* ============================================================= */}

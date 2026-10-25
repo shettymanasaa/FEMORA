@@ -10,11 +10,42 @@ import {
   Settings,
 } from '../types';
 import { db, FemoraDatabase } from './db';
+import { db as coreDb } from './access';
+
+export const MENSTRUAL_PERSONA_ID = 'fake-profile-menstrual-01';
+export const MATERNITY_PERSONA_ID = 'fake-profile-maternity-02';
+export const MENOPAUSE_PERSONA_ID = 'fake-profile-menopause-03';
+
+export const DEFAULT_DEMO_PROFILES = [
+  {
+    id: MENSTRUAL_PERSONA_ID,
+    nickname: 'Priya (Menstrual Demo)',
+    avatarColor: '#C77D88',
+    journey: 'menstrual' as const,
+    createdAt: '2026-08-15T08:00:00.000Z',
+    isSample: true,
+  },
+  {
+    id: MATERNITY_PERSONA_ID,
+    nickname: 'Aria (Maternity Demo)',
+    avatarColor: '#8C9B83',
+    journey: 'maternity' as const,
+    createdAt: '2026-06-01T08:00:00.000Z',
+    isSample: true,
+  },
+  {
+    id: MENOPAUSE_PERSONA_ID,
+    nickname: 'Elena (Menopause Demo)',
+    avatarColor: '#B69BC8',
+    journey: 'menopause' as const,
+    createdAt: '2026-05-10T08:00:00.000Z',
+    isSample: true,
+  },
+];
 
 // =========================================================================
 // Persona 1: Menstrual Health Tracking (Priya Sharma, Age 26)
 // =========================================================================
-export const MENSTRUAL_PERSONA_ID = 'fake-profile-menstrual-01';
 
 export const MENSTRUAL_PROFILE: Profile = {
   id: MENSTRUAL_PERSONA_ID,
@@ -61,6 +92,21 @@ export const MENSTRUAL_JOURNEY_PROFILE: JourneyProfile = {
 };
 
 export const MENSTRUAL_CHECKINS: Checkin[] = [
+  // Cycle 0 (August) - Establishes consistent 29-day baseline
+  {
+    id: 'chk-m-00',
+    profileId: MENSTRUAL_PERSONA_ID,
+    journey: 'menstrual',
+    loggedAt: '2026-08-08T09:00:00.000Z',
+    payload: {
+      symptoms: ['period_start', 'cramps', 'fatigue'],
+      scores: { pain: 6, mood: 5, flow: 3 },
+      mood: 'tired',
+      note: 'Cycle day 1. Consistent 29-day interval onset.',
+    },
+    isSample: true,
+    createdAt: '2026-08-08T09:00:00.000Z',
+  },
   // Cycle 1 (September)
   {
     id: 'chk-m-01',
@@ -157,7 +203,6 @@ export const MENSTRUAL_APPOINTMENTS: Appointment[] = [
 // =========================================================================
 // Persona 2: Maternity Care (Aria Chen, Age 30, Week 24)
 // =========================================================================
-export const MATERNITY_PERSONA_ID = 'fake-profile-maternity-02';
 
 export const MATERNITY_PROFILE: Profile = {
   id: MATERNITY_PERSONA_ID,
@@ -319,7 +364,6 @@ export const MATERNITY_APPOINTMENTS: Appointment[] = [
 // =========================================================================
 // Persona 3: Menopause Wellbeing (Elena Rostova, Age 51)
 // =========================================================================
-export const MENOPAUSE_PERSONA_ID = 'fake-profile-menopause-03';
 
 export const MENOPAUSE_PROFILE: Profile = {
   id: MENOPAUSE_PERSONA_ID,
@@ -548,6 +592,169 @@ export async function seedFakeDatasets(database: FemoraDatabase = db): Promise<{
       }
     }
   );
+
+  // Cross-layer synchronization: Populate Core Engine Profile & Check-ins for Priya
+  try {
+    if (coreDb?.profiles) {
+      await coreDb.profiles.put({
+        id: MENSTRUAL_PERSONA_ID,
+        profileId: MENSTRUAL_PERSONA_ID,
+        displayName: 'Priya Sharma',
+        activeJourney: 'menstrual',
+        createdAt: '2026-08-15T08:00:00.000Z',
+        updatedAt: '2026-10-25T08:00:00.000Z',
+      });
+      await coreDb.settings.put({
+        id: `set-${MENSTRUAL_PERSONA_ID}`,
+        profileId: MENSTRUAL_PERSONA_ID,
+        pinEnabled: false,
+        lockAfterMs: 600000,
+        createdAt: '2026-08-15T08:00:00.000Z',
+        updatedAt: '2026-10-25T08:00:00.000Z',
+      });
+    }
+    if (coreDb?.checkins) {
+      await coreDb.checkins.bulkPut([
+        {
+          id: 'core-chk-m-00',
+          profileId: MENSTRUAL_PERSONA_ID,
+          journey: 'menstrual',
+          date: '2026-08-08',
+          kind: 'period_start',
+          symptoms: [{ code: 'cramp', severity: 5 }, { code: 'fatigue', severity: 4 }],
+          createdAt: '2026-08-08T08:00:00.000Z',
+          updatedAt: '2026-08-08T08:00:00.000Z',
+        },
+        {
+          id: 'core-chk-m-01',
+          profileId: MENSTRUAL_PERSONA_ID,
+          journey: 'menstrual',
+          date: '2026-09-06',
+          kind: 'period_start',
+          symptoms: [{ code: 'cramp', severity: 6 }, { code: 'bloating', severity: 4 }],
+          createdAt: '2026-09-06T08:00:00.000Z',
+          updatedAt: '2026-09-06T08:00:00.000Z',
+        },
+        {
+          id: 'core-chk-m-02',
+          profileId: MENSTRUAL_PERSONA_ID,
+          journey: 'menstrual',
+          date: '2026-10-05',
+          kind: 'period_start',
+          symptoms: [{ code: 'cramp', severity: 5 }, { code: 'headache', severity: 3 }],
+          createdAt: '2026-10-05T08:00:00.000Z',
+          updatedAt: '2026-10-05T08:00:00.000Z',
+        },
+        {
+          id: 'core-chk-m-03',
+          profileId: MENSTRUAL_PERSONA_ID,
+          journey: 'menstrual',
+          date: '2026-10-18',
+          kind: 'daily',
+          symptoms: [{ code: 'ovulation_signs', severity: 1 }],
+          createdAt: '2026-10-18T08:00:00.000Z',
+          updatedAt: '2026-10-18T08:00:00.000Z',
+        },
+      ]);
+    }
+  } catch {
+    // Non-fatal if coreDb table is not available in mock test environments
+  }
+
+  // Cross-layer synchronization: Populate Local Storage for Frontend UI
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.setItem(
+        `femora.period-records.v1.${MENSTRUAL_PERSONA_ID}`,
+        JSON.stringify([
+          {
+            id: 'prd-m-01',
+            startDate: '2026-10-05',
+            endDate: '2026-10-10',
+            notes: 'Cycle 3 - arrived on schedule (29 days)',
+            createdAt: '2026-10-05T08:00:00.000Z',
+          },
+          {
+            id: 'prd-m-02',
+            startDate: '2026-09-06',
+            endDate: '2026-09-11',
+            notes: 'Cycle 2 - regular 29-day interval',
+            createdAt: '2026-09-06T08:00:00.000Z',
+          },
+          {
+            id: 'prd-m-03',
+            startDate: '2026-08-08',
+            endDate: '2026-08-13',
+            notes: 'Cycle 1 - 29-day baseline',
+            createdAt: '2026-08-08T08:00:00.000Z',
+          },
+        ])
+      );
+
+      window.localStorage.setItem(
+        `femora.menstrual-checkins.v1.${MENSTRUAL_PERSONA_ID}`,
+        JSON.stringify([
+          {
+            id: 'chk-loc-01',
+            date: '2026-10-05',
+            symptoms: ['Cramps', 'Headache', 'Bloating'],
+            mood: 'Tired',
+            sleep: 'Restless',
+            energy: 'Low',
+            pain: 5,
+            notes: 'Day 1 of cycle. Mild cramping, managed with heat pack.',
+            createdAt: '2026-10-05T09:00:00.000Z',
+          },
+          {
+            id: 'chk-loc-02',
+            date: '2026-10-06',
+            symptoms: ['Fatigue', 'Cramps'],
+            mood: 'Calm',
+            sleep: 'Good',
+            energy: 'Moderate',
+            pain: 3,
+            notes: 'Day 2. Flow steady.',
+            createdAt: '2026-10-06T09:00:00.000Z',
+          },
+          {
+            id: 'chk-loc-03',
+            date: '2026-10-18',
+            symptoms: ['Breast tenderness'],
+            mood: 'Energetic',
+            sleep: 'Deep',
+            energy: 'High',
+            pain: 0,
+            notes: 'Mid-cycle ovulation window. High energy and focus.',
+            createdAt: '2026-10-18T09:00:00.000Z',
+          },
+          {
+            id: 'chk-loc-04',
+            date: '2026-09-06',
+            symptoms: ['Cramps', 'Fatigue'],
+            mood: 'Tired',
+            sleep: 'Fair',
+            energy: 'Low',
+            pain: 6,
+            notes: 'September period start.',
+            createdAt: '2026-09-06T09:00:00.000Z',
+          },
+          {
+            id: 'chk-loc-05',
+            date: '2026-09-07',
+            symptoms: ['Cramps', 'Bloating'],
+            mood: 'Calm',
+            sleep: 'Good',
+            energy: 'Moderate',
+            pain: 5,
+            notes: 'Day 2.',
+            createdAt: '2026-09-07T09:00:00.000Z',
+          },
+        ])
+      );
+    } catch {
+      // Ignore if localStorage unavailable or sandboxed
+    }
+  }
 
   return {
     menstrualProfileId: MENSTRUAL_PERSONA_ID,

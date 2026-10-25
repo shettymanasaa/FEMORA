@@ -2,13 +2,12 @@ import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAppContext } from "../app/providers";
 import PageHeader from "../ui/common/PageHeader";
+import type { Journey } from "../types";
 
 export default function ProfileCreatePage() {
   const [nickname, setNickname] = useState("");
+  const [journey, setJourney] = useState<Journey>("menstrual");
   const [error, setError] = useState("");
-  const [enablePin, setEnablePin] = useState(false);
-  const [pin, setPin] = useState("");
-  const [confirmPin, setConfirmPin] = useState("");
   const { createProfile } = useAppContext();
   const navigate = useNavigate();
 
@@ -19,7 +18,7 @@ export default function ProfileCreatePage() {
     const cleanNickname = nickname.trim();
 
     if (!cleanNickname) {
-      setError("Enter a nickname to create your profile.");
+      setError("Enter a nickname to create your profile socket.");
       return;
     }
 
@@ -28,25 +27,28 @@ export default function ProfileCreatePage() {
       return;
     }
 
-    if (enablePin) {
-      if (!/^\d{4,6}$/.test(pin)) {
-        setError("Choose a PIN with 4 to 6 digits.");
-        return;
-      }
+    const profile = createProfile(cleanNickname, journey);
 
-      if (pin !== confirmPin) {
-        setError("The PIN entries do not match.");
-        return;
-      }
-
-      setError(
-        "PIN protection is not connected to the Core Engine yet. Your PIN has not been saved or activated. Turn off PIN setup to create this profile.",
-      );
+    if (!profile) {
+      setError("The profile could not be created. Please try again.");
       return;
     }
 
-    const profile = createProfile(cleanNickname);
+    // Direct entry to journey dashboard: only profile is required!
+    navigate(`/${journey}`);
+  }
 
+  function handleCreateWithIntake(event: React.MouseEvent) {
+    event.preventDefault();
+    setError("");
+
+    const cleanNickname = nickname.trim();
+    if (!cleanNickname) {
+      setError("Enter a nickname first.");
+      return;
+    }
+
+    const profile = createProfile(cleanNickname, journey);
     if (!profile) {
       setError("The profile could not be created. Please try again.");
       return;
@@ -73,14 +75,16 @@ export default function ProfileCreatePage() {
 
       <div className="standalone-content">
         <PageHeader
-          eyebrow="A SPACE THAT IS YOURS"
+          eyebrow="LOCAL-FIRST PROFILE SOCKET"
           title="Create your profile"
-          description="Choose a nickname. You do not need to enter your full legal name."
+          description="Only your profile is required. No password, no email, no cloud account needed."
         />
 
         <form className="section-card" onSubmit={handleSubmit}>
           <div className="field">
-            <label htmlFor="nickname">Nickname</label>
+            <label htmlFor="nickname">
+              <strong>Profile Nickname</strong>
+            </label>
             <input
               id="nickname"
               name="nickname"
@@ -91,94 +95,119 @@ export default function ProfileCreatePage() {
               }}
               maxLength={32}
               autoComplete="off"
-              placeholder="What should we call this profile?"
+              placeholder="e.g. Maya, Sam, or my space"
               required
+              autoFocus
             />
             <p className="field-help">
-              Use a nickname that you can recognise. Your date of
-              birth will be asked with the other intake questions,
-              not here.
+              Use any nickname you like. Your data is stored locally in your browser.
             </p>
           </div>
 
-          <section className="pin-setup">
-            <label className="pin-toggle">
-              <input
-                type="checkbox"
-                checked={enablePin}
-                onChange={(event) => {
-                  setEnablePin(event.target.checked);
-                  setError("");
-                  setPin("");
-                  setConfirmPin("");
-                }}
-              />
-              <span>
-                <strong>Set up a profile PIN</strong>
-                <small>
-                  Optional. PIN protection is not active until the
-                  Core Engine security API is connected.
-                </small>
-              </span>
+          <div className="field" style={{ marginTop: 20 }}>
+            <label>
+              <strong>Choose Your Active Journey</strong>
             </label>
+            <p className="field-help" style={{ marginTop: 2, marginBottom: 12 }}>
+              You can switch your journey anytime.
+            </p>
 
-            {enablePin && (
-              <div className="form-grid-two pin-fields">
-                <div className="field">
-                  <label htmlFor="profile-pin">Create PIN</label>
-                  <input
-                    id="profile-pin"
-                    inputMode="numeric"
-                    autoComplete="new-password"
-                    type="password"
-                    maxLength={6}
-                    value={pin}
-                    onChange={(event) => {
-                      setPin(
-                        event.target.value.replace(/\D/g, "").slice(0, 6),
-                      );
-                      setError("");
-                    }}
-                    placeholder="4–6 digits"
-                  />
-                </div>
+            <div
+              className="grid grid-3"
+              style={{ gap: 12 }}
+            >
+              {/* Option 1: Menstrual */}
+              <button
+                type="button"
+                onClick={() => setJourney("menstrual")}
+                style={{
+                  padding: "16px 12px",
+                  borderRadius: 12,
+                  border: journey === "menstrual" ? "2px solid #C77D88" : "1px solid var(--border, #d8dfd5)",
+                  background: journey === "menstrual" ? "#fbf5f6" : "var(--surface, #fff)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  transition: "all 0.15s ease",
+                }}
+              >
+                <span style={{ fontSize: "1.6rem" }}>🌸</span>
+                <strong style={{ display: "block", marginTop: 6, fontSize: "0.95rem" }}>
+                  Menstrual Health
+                </strong>
+                <small style={{ color: "var(--color-muted-foreground, #666)", fontSize: "0.78rem" }}>
+                  Cycle tracking, ovulation window, symptoms &amp; cycle insights.
+                </small>
+              </button>
 
-                <div className="field">
-                  <label htmlFor="profile-pin-confirm">Confirm PIN</label>
-                  <input
-                    id="profile-pin-confirm"
-                    inputMode="numeric"
-                    autoComplete="new-password"
-                    type="password"
-                    maxLength={6}
-                    value={confirmPin}
-                    onChange={(event) => {
-                      setConfirmPin(
-                        event.target.value.replace(/\D/g, "").slice(0, 6),
-                      );
-                      setError("");
-                    }}
-                    placeholder="Enter it again"
-                  />
-                </div>
+              {/* Option 2: Maternity */}
+              <button
+                type="button"
+                onClick={() => setJourney("maternity")}
+                style={{
+                  padding: "16px 12px",
+                  borderRadius: 12,
+                  border: journey === "maternity" ? "2px solid #8C9B83" : "1px solid var(--border, #d8dfd5)",
+                  background: journey === "maternity" ? "#f5f8f4" : "var(--surface, #fff)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  transition: "all 0.15s ease",
+                }}
+              >
+                <span style={{ fontSize: "1.6rem" }}>🌿</span>
+                <strong style={{ display: "block", marginTop: 6, fontSize: "0.95rem" }}>
+                  Maternity Care
+                </strong>
+                <small style={{ color: "var(--color-muted-foreground, #666)", fontSize: "0.78rem" }}>
+                  Pregnancy weeks, trimesters, checklists &amp; birth plan.
+                </small>
+              </button>
 
-                <p className="field-help pin-help">
-                  Do not rely on this form to protect your health data.
-                  This project version does not save or activate the PIN.
-                </p>
-              </div>
-            )}
-          </section>
+              {/* Option 3: Menopause */}
+              <button
+                type="button"
+                onClick={() => setJourney("menopause")}
+                style={{
+                  padding: "16px 12px",
+                  borderRadius: 12,
+                  border: journey === "menopause" ? "2px solid #B69BC8" : "1px solid var(--border, #d8dfd5)",
+                  background: journey === "menopause" ? "#faf6fd" : "var(--surface, #fff)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  transition: "all 0.15s ease",
+                }}
+              >
+                <span style={{ fontSize: "1.6rem" }}>🪻</span>
+                <strong style={{ display: "block", marginTop: 6, fontSize: "0.95rem" }}>
+                  Menopause Transition
+                </strong>
+                <small style={{ color: "var(--color-muted-foreground, #666)", fontSize: "0.78rem" }}>
+                  Perimenopause, hot flashes, sleep &amp; hormone care.
+                </small>
+              </button>
+            </div>
+          </div>
 
           {error && (
-            <p className="error-text" role="alert">
+            <p className="form-error" role="alert" style={{ marginTop: 16 }}>
               {error}
             </p>
           )}
 
-          <div className="button-row" style={{ marginTop: 22 }}>
-            <button className="button button-primary" type="submit">
-              Create profile
+          <div className="button-row" style={{ marginTop: 24 }}>
+            <button
+              className="button button-primary"
+              type="submit"
+              style={{ fontSize: "1rem", padding: "10px 24px" }}
+            >
+              Plug In &amp; Enter Dashboard →
+            </button>
+
+            <button
+              className="button button-secondary"
+              type="button"
+              onClick={handleCreateWithIntake}
+            >
+              Optional: Complete full medical intake first
             </button>
 
             <Link className="button button-secondary" to="/profiles">
@@ -186,6 +215,14 @@ export default function ProfileCreatePage() {
             </Link>
           </div>
         </form>
+
+        <section className="section-card" style={{ marginTop: 24, background: "var(--surface-soft, #f7faf6)" }}>
+          <p className="eyebrow">PRIVACY GUARANTEE</p>
+          <p style={{ margin: 0, fontSize: "0.85rem", lineHeight: 1.5, color: "var(--color-muted-foreground, #555)" }}>
+            FEMORA is completely local-first. We do not require passwords, email addresses, phone numbers,
+            or third-party trackers. Your health records and cycle logs remain inside this browser’s private storage.
+          </p>
+        </section>
       </div>
     </main>
   );

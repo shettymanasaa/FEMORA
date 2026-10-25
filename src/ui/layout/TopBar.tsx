@@ -1,10 +1,10 @@
-
 import { Link } from "react-router-dom";
 import { APP_NAME, APP_TAGLINE } from "../../lib/constants";
 import { useAppContext } from "../../app/providers";
+import ProfileSocket from "../common/ProfileSocket";
 
 export default function TopBar() {
-  const { activeProfile, theme, setTheme } = useAppContext();
+  const { theme, setTheme } = useAppContext();
 
   return (
     <header className="topbar">
@@ -34,25 +34,8 @@ export default function TopBar() {
           <span aria-hidden="true">{theme === "dark" ? "☼" : "☾"}</span>
         </button>
 
-        {activeProfile && (
-          <Link
-            className="profile-chip"
-            to="/settings"
-            aria-label={`Settings for ${activeProfile.nickname}`}
-          >
-            <span
-              className="avatar avatar-small"
-              style={{ backgroundColor: activeProfile.avatarColor }}
-              aria-hidden="true"
-            >
-              {activeProfile.nickname.charAt(0).toUpperCase()}
-            </span>
-
-            <span className="profile-chip-name">
-              {activeProfile.nickname}
-            </span>
-          </Link>
-        )}
+        {/* Profile Socket: The only credential required in FEMORA */}
+        <ProfileSocket />
       </div>
     </header>
   );

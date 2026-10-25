@@ -193,7 +193,8 @@ export default function OnboardingPage() {
 
     return (
       <section className="onboarding-flow">
-        <PageHeader
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderRadius: 10, background: "var(--surface-soft, #f4f7f2)", border: "1px solid var(--border, #d8dfd5)", marginBottom: 16, flexWrap: "wrap", gap: 12 }}><div><strong style={{ display: "block", fontSize: "0.9rem" }}>Only your profile is required</strong><span style={{ fontSize: "0.8rem", color: "var(--color-muted-foreground, #666)" }}>Medical intake questions are completely optional.</span></div><button type="button" className="button button-primary" style={{ fontSize: "0.85rem", padding: "6px 16px" }} onClick={() => { if (activeProfile?.journey) { navigate(`/${activeProfile.journey}`); } else { navigate("/select-journey"); } }}>Skip Intake &amp; Enter Dashboard →</button></div>
+      <PageHeader
           eyebrow="YOUR FEMORA GUIDE"
           title={`Welcome, ${activeProfile.nickname}.`}
           description="A quick introduction before you personalise your space."
@@ -270,6 +271,7 @@ export default function OnboardingPage() {
 
   return (
     <div className="onboarding-flow">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderRadius: 10, background: "var(--surface-soft, #f4f7f2)", border: "1px solid var(--border, #d8dfd5)", marginBottom: 16, flexWrap: "wrap", gap: 12 }}><div><strong style={{ display: "block", fontSize: "0.9rem" }}>Only your profile is required</strong><span style={{ fontSize: "0.8rem", color: "var(--color-muted-foreground, #666)" }}>Medical intake questions are completely optional.</span></div><button type="button" className="button button-primary" style={{ fontSize: "0.85rem", padding: "6px 16px" }} onClick={() => { if (activeProfile?.journey) { navigate(`/${activeProfile.journey}`); } else { navigate("/select-journey"); } }}>Skip Intake &amp; Enter Dashboard →</button></div>
       <PageHeader
         eyebrow="LET'S PERSONALISE YOUR SPACE"
         title="A few things about you"

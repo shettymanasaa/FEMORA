@@ -1,6 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 import PageHeader from "../../ui/common/PageHeader";
 import { useAppContext } from "../../app/providers";
+import { coreApi } from "../../data/public";
 
 type PeriodRecord = {
   id: string;
@@ -279,6 +280,7 @@ export default function CyclePage() {
     };
 
     if (persist([...records, record])) {
+      coreApi.saveMenstrualCheckIn(profileId, { date: startDate, kind: "period_start", flow: "medium" }).catch(() => {});
       setStartDate("");
       setEndDate("");
       setNotes("");
