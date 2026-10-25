@@ -1,4 +1,4 @@
-﻿import {
+import {
   BrowserRouter,
   Navigate,
   Route,
@@ -169,6 +169,10 @@ function AppRoutes() {
         />
         <Route
           path="/maternity/hospital-checklist"
+          element={<JourneyGate journey="maternity"><HospitalChecklistPage /></JourneyGate>}
+        />
+        <Route
+          path="/maternity/checklist"
           element={<JourneyGate journey="maternity"><HospitalChecklistPage /></JourneyGate>}
         />
         <Route

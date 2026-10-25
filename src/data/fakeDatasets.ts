@@ -612,6 +612,42 @@ export async function seedFakeDatasets(database: FemoraDatabase = db): Promise<{
         createdAt: '2026-08-15T08:00:00.000Z',
         updatedAt: '2026-10-25T08:00:00.000Z',
       });
+
+      // Maternity: Aria Chen
+      await coreDb.profiles.put({
+        id: MATERNITY_PERSONA_ID,
+        profileId: MATERNITY_PERSONA_ID,
+        displayName: 'Aria Chen',
+        activeJourney: 'maternity',
+        createdAt: '2026-06-01T08:00:00.000Z',
+        updatedAt: '2026-10-25T08:00:00.000Z',
+      });
+      await coreDb.settings.put({
+        id: `set-${MATERNITY_PERSONA_ID}`,
+        profileId: MATERNITY_PERSONA_ID,
+        pinEnabled: false,
+        lockAfterMs: 600000,
+        createdAt: '2026-06-01T08:00:00.000Z',
+        updatedAt: '2026-10-25T08:00:00.000Z',
+      });
+
+      // Menopause: Elena Rostova
+      await coreDb.profiles.put({
+        id: MENOPAUSE_PERSONA_ID,
+        profileId: MENOPAUSE_PERSONA_ID,
+        displayName: 'Elena Rostova',
+        activeJourney: 'menopause',
+        createdAt: '2026-05-10T08:00:00.000Z',
+        updatedAt: '2026-10-25T08:00:00.000Z',
+      });
+      await coreDb.settings.put({
+        id: `set-${MENOPAUSE_PERSONA_ID}`,
+        profileId: MENOPAUSE_PERSONA_ID,
+        pinEnabled: false,
+        lockAfterMs: 600000,
+        createdAt: '2026-05-10T08:00:00.000Z',
+        updatedAt: '2026-10-25T08:00:00.000Z',
+      });
     }
     if (coreDb?.checkins) {
       await coreDb.checkins.bulkPut([
@@ -622,6 +658,7 @@ export async function seedFakeDatasets(database: FemoraDatabase = db): Promise<{
           date: '2026-08-08',
           kind: 'period_start',
           symptoms: [{ code: 'cramp', severity: 5 }, { code: 'fatigue', severity: 4 }],
+          data: {},
           createdAt: '2026-08-08T08:00:00.000Z',
           updatedAt: '2026-08-08T08:00:00.000Z',
         },
@@ -632,6 +669,7 @@ export async function seedFakeDatasets(database: FemoraDatabase = db): Promise<{
           date: '2026-09-06',
           kind: 'period_start',
           symptoms: [{ code: 'cramp', severity: 6 }, { code: 'bloating', severity: 4 }],
+          data: {},
           createdAt: '2026-09-06T08:00:00.000Z',
           updatedAt: '2026-09-06T08:00:00.000Z',
         },
@@ -642,6 +680,7 @@ export async function seedFakeDatasets(database: FemoraDatabase = db): Promise<{
           date: '2026-10-05',
           kind: 'period_start',
           symptoms: [{ code: 'cramp', severity: 5 }, { code: 'headache', severity: 3 }],
+          data: {},
           createdAt: '2026-10-05T08:00:00.000Z',
           updatedAt: '2026-10-05T08:00:00.000Z',
         },
@@ -652,6 +691,7 @@ export async function seedFakeDatasets(database: FemoraDatabase = db): Promise<{
           date: '2026-10-18',
           kind: 'daily',
           symptoms: [{ code: 'ovulation_signs', severity: 1 }],
+          data: {},
           createdAt: '2026-10-18T08:00:00.000Z',
           updatedAt: '2026-10-18T08:00:00.000Z',
         },

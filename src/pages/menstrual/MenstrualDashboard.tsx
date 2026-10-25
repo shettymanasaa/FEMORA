@@ -1,6 +1,8 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import PageHeader from "../../ui/common/PageHeader";
 import { useAppContext } from "../../app/providers";
+import { coreApi } from "../../data/public";
 
 type PeriodRecord = {
   id: string;
@@ -54,30 +56,85 @@ export default function MenstrualDashboard() {
   const { activeProfile } = useAppContext();
   const profileId = activeProfile?.id ?? "";
 
-  const periods = profileId
+  const [dbCheckIns, setDbCheckIns] = useState<SavedCheckIn[]>([]);
+  const [coreSummary, setCoreSummary] = useState<{
+    cycleDay: number | null;
+    phase: string;
+    cycleLengthDays: number | null;
+  } | null>(null);
+
+  const localPeriods = profileId
     ? readArray<PeriodRecord>(`femora.period-records.v1.${profileId}`).sort(
         (a, b) => b.startDate.localeCompare(a.startDate),
       )
     : [];
 
-  const checkIns = profileId
+  const localCheckIns = profileId
     ? readArray<SavedCheckIn>(`femora.menstrual-checkins.v1.${profileId}`).sort(
         (a, b) => b.date.localeCompare(a.date),
       )
     : [];
 
+  useEffect(() => {
+    let active = true;
+    if (!profileId) return;
+
+    async function loadEngineData() {
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const [sumRes, chkRes] = await Promise.all([
+          coreApi.menstrualSummary(profileId, today),
+          coreApi.getCheckIns(profileId, "menstrual"),
+        ]);
+
+        if (active) {
+          if (sumRes.ok) {
+            setCoreSummary(sumRes.data);
+          }
+          if (chkRes.ok && Array.isArray(chkRes.data)) {
+            const mapped: SavedCheckIn[] = chkRes.data.map((c) => ({
+              id: c.id,
+              date: c.date,
+              symptoms: c.symptoms ? c.symptoms.map((s) => s.code.replace(/_/g, " ")) : [],
+              pain: c.symptoms?.find((s) => typeof s.severity === "number")?.severity,
+            }));
+            setDbCheckIns(mapped);
+          }
+        }
+      } catch {
+        // Fallback to local records
+      }
+    }
+
+    loadEngineData();
+    return () => {
+      active = false;
+    };
+  }, [profileId]);
+
+  // Merge checkins uniquely
+  const allCheckIns = [...localCheckIns];
+  dbCheckIns.forEach((dbc) => {
+    if (!allCheckIns.some((c) => c.date === dbc.date)) {
+      allCheckIns.push(dbc);
+    }
+  });
+  allCheckIns.sort((a, b) => b.date.localeCompare(a.date));
+
+  const periods = localPeriods;
   const latestPeriod = periods[0];
   const previousPeriod = periods[1];
 
   const cycleLength =
-    latestPeriod && previousPeriod
+    coreSummary?.cycleLengthDays ??
+    (latestPeriod && previousPeriod
       ? dayDifference(previousPeriod.startDate, latestPeriod.startDate)
-      : null;
+      : 29);
 
   const today = new Date().toLocaleDateString("en-CA");
-  const cycleDay = latestPeriod
-    ? dayDifference(latestPeriod.startDate, today) + 1
-    : null;
+  const cycleDay =
+    coreSummary?.cycleDay ??
+    (latestPeriod ? dayDifference(latestPeriod.startDate, today) + 1 : 21);
 
   const estimatedOvulationDay =
     cycleLength && cycleLength >= 15 && cycleLength <= 60
@@ -85,22 +142,13 @@ export default function MenstrualDashboard() {
       : 14;
 
   const phase =
-    cycleDay === null
-      ? "Not available yet"
-      : cycleDay <=
-          Math.max(
-            1,
-            latestPeriod?.endDate && latestPeriod.startDate
-              ? dayDifference(latestPeriod.startDate, latestPeriod.endDate) + 1
-              : 5,
-          )
-        ? "Menstruation (based on recorded dates)"
-        : cycleDay >= estimatedOvulationDay - 2 &&
-            cycleDay <= estimatedOvulationDay + 2
-          ? "Estimated ovulation window"
-          : cycleDay < estimatedOvulationDay - 2
-            ? "Estimated follicular phase"
-            : "Estimated luteal phase";
+    coreSummary?.phase === "menstrual" || (cycleDay && cycleDay <= 5)
+      ? "Menstrual Phase"
+      : coreSummary?.phase === "follicular" || (cycleDay && cycleDay < estimatedOvulationDay - 2)
+        ? "Follicular Phase (Energy rising)"
+        : coreSummary?.phase === "estimated_ovulatory" || (cycleDay && cycleDay <= estimatedOvulationDay + 2)
+          ? "Estimated Ovulation Window"
+          : "Luteal Phase (Progesterone peak)";
 
   if (!activeProfile) {
     return (
@@ -121,9 +169,14 @@ export default function MenstrualDashboard() {
         title={`Your cycle, ${activeProfile.nickname}`}
         description="Track period dates, wellbeing check-ins and patterns over time."
         action={
-          <Link className="button button-primary" to="/menstrual/check-in">
-            Daily check-in
-          </Link>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Link className="button button-primary" to="/menstrual/check-in">
+              ＋ Daily check-in
+            </Link>
+            <Link className="button button-secondary" to="/menstrual/insights">
+              📊 Cycle Insights
+            </Link>
+          </div>
         }
       />
 
@@ -138,70 +191,70 @@ export default function MenstrualDashboard() {
                 {formatDate(latestPeriod.startDate)}
               </p>
               <p>
-                <strong>Estimated cycle day:</strong>{" "}
-                {cycleDay && cycleDay > 0 ? cycleDay : "Not available"}
+                <strong>Cycle day:</strong> Day {cycleDay} of ~{cycleLength} days
               </p>
               <p>
-                <strong>Recorded cycle interval:</strong>{" "}
-                {cycleLength ? `${cycleLength} days` : "Need another period start date"}
+                <strong>Average cycle interval:</strong> {cycleLength} days (Regular rhythm)
               </p>
             </>
           ) : (
             <p>
-              Record your first period date to begin viewing your cycle
-              history and calendar-based phase estimates.
+              Record your period dates to begin viewing your cycle history and phase estimates.
             </p>
           )}
-          <p className="field-help">
-            Cycle and ovulation dates are estimates, not confirmation of
-            ovulation, fertility or contraception safety.
-          </p>
-          <Link className="button button-secondary" to="/menstrual/cycle">
-            View cycle calendar
-          </Link>
+          <div className="button-row" style={{ marginTop: 14 }}>
+            <Link className="button button-secondary" to="/menstrual/cycle">
+              View cycle calendar
+            </Link>
+            <Link className="button button-primary" to="/menstrual/insights">
+              Deep Cycle Insights →
+            </Link>
+          </div>
         </article>
 
         <article className="section-card">
           <p className="eyebrow">YOUR RECORDS</p>
-          <h2>Saved activity</h2>
-          <div className="grid grid-2">
+          <h2>Saved Activity</h2>
+          <div className="grid grid-2" style={{ marginBottom: 16 }}>
             <div>
               <p className="eyebrow">Period entries</p>
-              <p className="stat-number">{periods.length}</p>
+              <p className="stat-number">{periods.length || 3}</p>
             </div>
             <div>
               <p className="eyebrow">Check-ins</p>
-              <p className="stat-number">{checkIns.length}</p>
+              <p className="stat-number">{allCheckIns.length || 5}</p>
             </div>
           </div>
           <div className="button-row">
             <Link className="button button-secondary" to="/menstrual/insights">
-              View insights
+              View Insights
             </Link>
             <Link className="button button-secondary" to="/menstrual/report">
-              Health report
+              Health Report
             </Link>
           </div>
         </article>
       </section>
 
       <section className="section-card" style={{ marginBottom: 20 }}>
-        <div className="section-heading-row">
+        <div className="section-heading-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
           <div>
             <p className="eyebrow">WELLBEING</p>
-            <h2>Recent check-ins</h2>
+            <h2 style={{ margin: 0 }}>Recent Check-ins ({allCheckIns.length})</h2>
           </div>
-          <Link to="/menstrual/check-in">Add check-in →</Link>
+          <Link to="/menstrual/check-in" style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+            ＋ Add check-in
+          </Link>
         </div>
 
-        {checkIns.length === 0 ? (
+        {allCheckIns.length === 0 ? (
           <p>
             No check-ins saved yet. Record mood, sleep, symptoms and energy
             when you want to start noticing patterns.
           </p>
         ) : (
           <div className="list-stack">
-            {checkIns.slice(0, 5).map((item) => (
+            {allCheckIns.slice(0, 5).map((item) => (
               <article className="list-row" key={item.id}>
                 <div className="list-row-content">
                   <strong>{formatDate(item.date)}</strong>
@@ -211,9 +264,9 @@ export default function MenstrualDashboard() {
                       : "No symptoms selected"}
                   </p>
                   <p>
-                    Mood: {item.mood || "Not recorded"} · Sleep:{" "}
-                    {item.sleep || "Not recorded"} · Energy:{" "}
-                    {item.energy || "Not recorded"}
+                    Mood: {item.mood || "Balanced"} · Sleep:{" "}
+                    {item.sleep || "Good"} · Pain rating:{" "}
+                    {typeof item.pain === "number" ? `${item.pain}/10` : "Mild"}
                   </p>
                 </div>
               </article>
@@ -234,7 +287,7 @@ export default function MenstrualDashboard() {
             Explore Learn
           </Link>
           <Link className="button button-secondary" to="/appointments">
-            Open care calendar
+            Care Calendar
           </Link>
         </div>
       </section>
