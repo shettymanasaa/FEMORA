@@ -1,6 +1,12 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import PageHeader from "../../ui/common/PageHeader";
 import { useAppContext } from "../../app/providers";
+
+type IntakeCycleInfo = {
+  periodDate?: string;
+  usualCycleLength?: string;
+  periodStatus?: string;
+};
 
 type PeriodRecord = {
   id: string;
@@ -23,6 +29,30 @@ const DEFAULT_PERIOD_LENGTH = 5;
 
 function getStorageKey(profileId: string) {
   return `femora.period-records.v1.${profileId}`;
+}
+
+function localDateISO(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function readIntakeCycleInfo(profileId: string): IntakeCycleInfo | null {
+  try {
+    const raw = localStorage.getItem(`femora.intake.v1.${profileId}`);
+    if (!raw) return null;
+
+    const parsed: unknown = JSON.parse(raw);
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+
+    return parsed as IntakeCycleInfo;
+  } catch {
+    return null;
+  }
 }
 
 function readRecords(profileId: string): PeriodRecord[] {
@@ -65,6 +95,17 @@ function formatDate(value?: string) {
   }).format(date);
 }
 
+function isValidDateString(value?: string): value is string {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+
+  const date = new Date(`${value}T00:00:00`);
+
+  return (
+    !Number.isNaN(date.getTime()) &&
+    localDateISO(date) === value
+  );
+}
+
 function estimateCycleLength(records: PeriodRecord[]): number {
   const sorted = [...records].sort((a, b) =>
     a.startDate.localeCompare(b.startDate),
@@ -78,7 +119,9 @@ function estimateCycleLength(records: PeriodRecord[]): number {
       sorted[index].startDate,
     );
 
-    if (days >= 15 && days <= 60) lengths.push(days);
+    if (days >= 15 && days <= 60) {
+      lengths.push(days);
+    }
   }
 
   if (!lengths.length) return DEFAULT_CYCLE_LENGTH;
@@ -100,10 +143,7 @@ function getPhase(
   );
 
   // Calendar-based estimates only. Ovulation timing varies.
-  const estimatedOvulationDay = Math.max(
-    1,
-    safeCycleLength - 14,
-  );
+  const estimatedOvulationDay = Math.max(1, safeCycleLength - 14);
 
   if (cycleDay <= safePeriodLength) {
     return {
@@ -148,8 +188,10 @@ function getPhase(
 }
 
 function makeId() {
-  return globalThis.crypto?.randomUUID?.() ??
-    `period-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `period-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+  );
 }
 
 export default function CyclePage() {
@@ -159,6 +201,18 @@ export default function CyclePage() {
   const [records, setRecords] = useState<PeriodRecord[]>(() =>
     profileId ? readRecords(profileId) : [],
   );
+
+  const [intakeInfo, setIntakeInfo] = useState<IntakeCycleInfo | null>(() =>
+    profileId ? readIntakeCycleInfo(profileId) : null,
+  );
+
+  useEffect(() => {
+    setRecords(profileId ? readRecords(profileId) : []);
+    setIntakeInfo(profileId ? readIntakeCycleInfo(profileId) : null);
+    setError("");
+    setSuccess("");
+  }, [profileId]);
+
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [notes, setNotes] = useState("");
@@ -171,10 +225,37 @@ export default function CyclePage() {
   );
 
   const latestPeriod = sortedRecords[0];
-  const cycleLength = useMemo(
-    () => estimateCycleLength(records),
-    [records],
-  );
+
+  const cycleLength = useMemo(() => {
+    if (records.length >= 2) {
+      return estimateCycleLength(records);
+    }
+
+    const savedLength = Number(intakeInfo?.usualCycleLength);
+
+    if (
+      intakeInfo?.periodStatus === "yes" &&
+      Number.isFinite(savedLength) &&
+      savedLength >= 15 &&
+      savedLength <= 60
+    ) {
+      return Math.round(savedLength);
+    }
+
+    return DEFAULT_CYCLE_LENGTH;
+  }, [records, intakeInfo]);
+
+  // Onboarding information is only a fallback.
+  // It is never inserted into the actual period-record history.
+  const profilePeriodDate =
+    intakeInfo?.periodStatus === "yes" &&
+    isValidDateString(intakeInfo.periodDate)
+      ? intakeInfo.periodDate
+      : "";
+
+  const latestPeriodStart =
+    latestPeriod?.startDate ||
+    (records.length === 0 ? profilePeriodDate : "");
 
   const periodLength = latestPeriod?.endDate
     ? Math.max(
@@ -186,8 +267,10 @@ export default function CyclePage() {
       )
     : DEFAULT_PERIOD_LENGTH;
 
-  const cycleDay = latestPeriod
-    ? dayDifference(latestPeriod.startDate, new Date().toLocaleDateString("en-CA")) + 1
+  const today = localDateISO();
+
+  const cycleDay = latestPeriodStart
+    ? dayDifference(latestPeriodStart, today) + 1
     : 0;
 
   const currentCycleDay =
@@ -197,19 +280,19 @@ export default function CyclePage() {
     ? getPhase(currentCycleDay, cycleLength, periodLength)
     : null;
 
-  const estimatedNextPeriod = latestPeriod
+  const estimatedNextPeriod = latestPeriodStart
     ? (() => {
-        const date = new Date(`${latestPeriod.startDate}T00:00:00`);
+        const date = new Date(`${latestPeriodStart}T00:00:00`);
         date.setDate(date.getDate() + cycleLength);
-        return date.toLocaleDateString("en-CA");
+        return localDateISO(date);
       })()
     : "";
 
-  const estimatedOvulation = latestPeriod
+  const estimatedOvulation = latestPeriodStart
     ? (() => {
-        const date = new Date(`${latestPeriod.startDate}T00:00:00`);
+        const date = new Date(`${latestPeriodStart}T00:00:00`);
         date.setDate(date.getDate() + Math.max(1, cycleLength - 14) - 1);
-        return date.toLocaleDateString("en-CA");
+        return localDateISO(date);
       })()
     : "";
 
@@ -244,10 +327,23 @@ export default function CyclePage() {
       return;
     }
 
-    const today = new Date().toLocaleDateString("en-CA");
+    if (!isValidDateString(startDate)) {
+      setError("Please enter a valid period start date.");
+      return;
+    }
 
     if (startDate > today) {
       setError("The period start date cannot be in the future.");
+      return;
+    }
+
+    if (endDate && !isValidDateString(endDate)) {
+      setError("Please enter a valid period end date.");
+      return;
+    }
+
+    if (endDate && endDate > today) {
+      setError("The period end date cannot be in the future.");
       return;
     }
 
@@ -257,7 +353,9 @@ export default function CyclePage() {
     }
 
     if (endDate && dayDifference(startDate, endDate) > 14) {
-      setError("Please check the end date. It is more than 15 days after the start date.");
+      setError(
+        "Please check the end date. It is more than 15 days after the start date.",
+      );
       return;
     }
 
@@ -287,6 +385,7 @@ export default function CyclePage() {
 
   function deleteRecord(id: string) {
     if (!window.confirm("Delete this period record?")) return;
+
     persist(records.filter((record) => record.id !== id));
   }
 
@@ -299,20 +398,47 @@ export default function CyclePage() {
     );
   }
 
+  if (activeProfile.journey !== "menstrual") {
+    return (
+      <main>
+        <PageHeader
+          eyebrow="HEALTH JOURNEYS"
+          title="Your care calendar"
+          description="Cycle tracking is specific to the Menstrual Health journey. You can use the shared calendar for appointments and health entries in your current journey."
+        />
+
+        <section className="section-card">
+          <h2>Open your shared calendar</h2>
+          <p>
+            Your current journey is set to{" "}
+            {activeProfile.journey === "maternity"
+              ? "Maternity"
+              : activeProfile.journey === "menopause"
+                ? "Menopause"
+                : "another health journey"}
+            . Cycle predictions are not shown for this journey.
+          </p>
+          <a className="button button-primary" href="/appointments">
+            Go to Calendar
+          </a>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main>
       <PageHeader
         eyebrow="MENSTRUAL HEALTH"
         title="Your cycle calendar"
-        description="Record period dates and view estimated cycle phases based on your saved history."
+        description="Record period dates and view approximate cycle phases based on your saved period history and profile information."
       />
 
       <section className="section-card" style={{ marginBottom: 20 }}>
         <h2>Record a period</h2>
         <p>
           Add the first day of bleeding and, if known, the last day.
-          You can leave the end date blank and update it later by
-          adding a new record if needed.
+          You can leave the end date blank.
         </p>
 
         <form onSubmit={handleSubmit}>
@@ -323,7 +449,7 @@ export default function CyclePage() {
                 id="period-start"
                 type="date"
                 value={startDate}
-                max={new Date().toLocaleDateString("en-CA")}
+                max={today}
                 onChange={(event) => setStartDate(event.target.value)}
                 required
               />
@@ -336,7 +462,7 @@ export default function CyclePage() {
                 type="date"
                 value={endDate}
                 min={startDate || undefined}
-                max={new Date().toLocaleDateString("en-CA")}
+                max={today}
                 onChange={(event) => setEndDate(event.target.value)}
               />
             </div>
@@ -354,7 +480,12 @@ export default function CyclePage() {
             />
           </div>
 
-          {error && <p className="error-text" role="alert">{error}</p>}
+          {error && (
+            <p className="error-text" role="alert">
+              {error}
+            </p>
+          )}
+
           {success && <p role="status">{success}</p>}
 
           <button className="button button-primary" type="submit">
@@ -367,15 +498,19 @@ export default function CyclePage() {
         <article className="section-card">
           <p className="eyebrow">CURRENT CYCLE ESTIMATE</p>
           <h2>{phase?.name ?? "Not enough data yet"}</h2>
+
           {phase ? (
             <>
-              <p>Estimated cycle day: {currentCycleDay} of about {cycleLength}</p>
+              <p>
+                Estimated cycle day: {currentCycleDay} of about {cycleLength}
+              </p>
               <p>{phase.description}</p>
             </>
           ) : (
             <p>
-              Save a period start date to see the estimated cycle day
-              and phase.
+              Save a period start date to see the estimated cycle day and
+              phase. If you have a saved last-period date in your profile,
+              it may be used as a starting point.
             </p>
           )}
         </article>
@@ -383,53 +518,87 @@ export default function CyclePage() {
         <article className="section-card">
           <p className="eyebrow">YOUR CYCLE DETAILS</p>
           <h2>Personal history</h2>
+
           <p>
-            <strong>Average recorded cycle:</strong>{" "}
-            {records.length >= 2 ? `${cycleLength} days` : "Not enough records"}
+            <strong>Cycle length used:</strong>{" "}
+            {records.length >= 2
+              ? `${cycleLength} days (average of recorded periods)`
+              : intakeInfo?.periodStatus === "yes" &&
+                  intakeInfo.usualCycleLength &&
+                  Number(intakeInfo.usualCycleLength) >= 15 &&
+                  Number(intakeInfo.usualCycleLength) <= 60
+                ? `${cycleLength} days (from your saved profile)`
+                : `${cycleLength} days (general estimate)`}
           </p>
+
+          <p>
+            <strong>Last period start used:</strong>{" "}
+            {formatDate(latestPeriodStart)}
+            {latestPeriodStart && !latestPeriod
+              ? " (from your profile, not a saved period record)"
+              : ""}
+          </p>
+
           <p>
             <strong>Estimated next period:</strong>{" "}
             {formatDate(estimatedNextPeriod)}
           </p>
+
           <p>
             <strong>Estimated ovulation date:</strong>{" "}
             {formatDate(estimatedOvulation)}
           </p>
+
           <p className="field-help">
-            Estimates use calendar dates and may be inaccurate, especially
-            when cycles are irregular.
+            Predictions are estimates, not confirmed dates. They use recorded
+            period history first, then saved profile answers when available.
+            Calendar calculations can be inaccurate, especially when cycles
+            are irregular.
           </p>
         </article>
       </section>
 
       <section className="section-card" style={{ marginBottom: 20 }}>
         <h2>Understand the phases</h2>
+
         <div className="grid grid-2">
           <article className="phase-card">
             <span className="phase-dot phase-period" />
             <h3>Menstruation</h3>
             <p>Days when menstrual bleeding occurs.</p>
           </article>
+
           <article className="phase-card">
             <span className="phase-dot phase-follicular" />
             <h3>Follicular phase</h3>
-            <p>Begins on the first day of the period and continues toward ovulation.</p>
+            <p>
+              Begins on the first day of the period and continues toward
+              ovulation.
+            </p>
           </article>
+
           <article className="phase-card">
             <span className="phase-dot phase-ovulation" />
             <h3>Estimated ovulation window</h3>
-            <p>A calendar estimate only. It cannot confirm that ovulation occurred.</p>
+            <p>
+              A calendar estimate only. It cannot confirm that ovulation
+              occurred.
+            </p>
           </article>
+
           <article className="phase-card">
             <span className="phase-dot phase-luteal" />
             <h3>Luteal phase</h3>
-            <p>Follows ovulation and continues until the next period.</p>
+            <p>
+              Follows ovulation and continues until the next period.
+            </p>
           </article>
         </div>
       </section>
 
       <section className="section-card">
         <h2>Period history</h2>
+
         {sortedRecords.length === 0 ? (
           <p>No period dates saved yet. Your history will appear here.</p>
         ) : (
@@ -437,12 +606,15 @@ export default function CyclePage() {
             {sortedRecords.map((record) => (
               <article className="list-row" key={record.id}>
                 <div className="list-row-content">
-                  <strong>Period started {formatDate(record.startDate)}</strong>
+                  <strong>
+                    Period started {formatDate(record.startDate)}
+                  </strong>
                   <p>
                     End date: {formatDate(record.endDate)}
                     {record.notes ? ` · ${record.notes}` : ""}
                   </p>
                 </div>
+
                 <button
                   type="button"
                   className="button button-secondary"

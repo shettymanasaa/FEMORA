@@ -1,5 +1,5 @@
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { JOURNEYS } from "../lib/constants";
 import { journeyHome } from "../lib/routes";
@@ -16,34 +16,37 @@ const journeyImages: Record<Journey, string> = {
 export default function JourneySelectPage() {
   const { activeProfile, updateProfileJourney } = useAppContext();
   const navigate = useNavigate();
+
   const [selected, setSelected] = useState<Journey | null>(
     activeProfile?.journey ?? null,
   );
 
-  
-function confirmJourney() {
-  if (!selected || !activeProfile) return;
+  useEffect(() => {
+    setSelected(activeProfile?.journey ?? null);
+  }, [activeProfile?.id, activeProfile?.journey]);
 
-  if (
-    activeProfile.journey &&
-    activeProfile.journey !== selected &&
-    !window.confirm(
-      "Change this profile's active journey? Existing records should remain associated with their original journey.",
-    )
-  ) {
-    return;
+  function confirmJourney() {
+    if (!selected || !activeProfile) return;
+
+    if (
+      activeProfile.journey &&
+      activeProfile.journey !== selected &&
+      !window.confirm(
+        "Change this profile's active journey? Existing records should remain associated with their original journey.",
+      )
+    ) {
+      return;
+    }
+
+    const success = updateProfileJourney(activeProfile.id, selected);
+
+    if (!success) {
+      window.alert("The journey could not be saved. Please try again.");
+      return;
+    }
+
+    navigate(journeyHome(selected), { replace: true });
   }
-
-  const success = updateProfileJourney(activeProfile.id, selected);
-
-  if (!success) {
-    window.alert("The journey could not be saved. Please try again.");
-    return;
-  }
-
-  navigate(journeyHome(selected));
-}
-
 
   return (
     <div>
@@ -56,7 +59,9 @@ function confirmJourney() {
       <div className="grid grid-3">
         {JOURNEYS.map((journey) => (
           <button
-            className={`journey-card${selected === journey.id ? " journey-card-selected" : ""}`}
+            className={`journey-card${
+              selected === journey.id ? " journey-card-selected" : ""
+            }`}
             type="button"
             key={journey.id}
             aria-pressed={selected === journey.id}
@@ -70,9 +75,11 @@ function confirmJourney() {
                 loading="lazy"
               />
             </span>
+
             <h2>{journey.title}</h2>
             <strong>{journey.subtitle}</strong>
             <p>{journey.description}</p>
+
             <span className="journey-choice">
               {selected === journey.id ? "✓ Selected" : "Select journey"}
             </span>
@@ -90,7 +97,7 @@ function confirmJourney() {
           className="button button-primary"
           type="button"
           onClick={confirmJourney}
-          disabled={!selected}
+          disabled={!selected || !activeProfile}
         >
           Continue to my journey →
         </button>
