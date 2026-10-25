@@ -58,7 +58,7 @@ export default function LearnPage() {
       </div>
 
       <div className="notice notice-warning" style={{ marginBottom: 20 }}>
-        {sampleLabel} These example articles 
+        {sampleLabel} 
       </div>
 
       <section className="section-card sexual-wellbeing-entry" aria-labelledby="sexual-wellbeing-title">

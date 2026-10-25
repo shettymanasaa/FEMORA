@@ -14,35 +14,36 @@ const journeyImages: Record<Journey, string> = {
 };
 
 export default function JourneySelectPage() {
-  const { activeProfile, profiles } = useAppContext();
+  const { activeProfile, updateProfileJourney } = useAppContext();
   const navigate = useNavigate();
   const [selected, setSelected] = useState<Journey | null>(
     activeProfile?.journey ?? null,
   );
 
-  function confirmJourney() {
-    if (!selected || !activeProfile) return;
+  
+function confirmJourney() {
+  if (!selected || !activeProfile) return;
 
-    if (
-      activeProfile.journey &&
-      activeProfile.journey !== selected &&
-      !window.confirm(
-        "Change this profile's active journey? Existing records should remain associated with their original journey.",
-      )
-    ) return;
-
-    const updatedProfiles = profiles.map((profile) =>
-      profile.id === activeProfile.id ? { ...profile, journey: selected } : profile,
-    );
-
-    try {
-      localStorage.setItem("femora.local-profiles.v1", JSON.stringify(updatedProfiles));
-      navigate(journeyHome(selected));
-      window.location.reload();
-    } catch {
-      window.alert("The journey could not be saved. Please try again.");
-    }
+  if (
+    activeProfile.journey &&
+    activeProfile.journey !== selected &&
+    !window.confirm(
+      "Change this profile's active journey? Existing records should remain associated with their original journey.",
+    )
+  ) {
+    return;
   }
+
+  const success = updateProfileJourney(activeProfile.id, selected);
+
+  if (!success) {
+    window.alert("The journey could not be saved. Please try again.");
+    return;
+  }
+
+  navigate(journeyHome(selected));
+}
+
 
   return (
     <div>

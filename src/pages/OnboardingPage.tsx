@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAppContext } from "../app/providers";
 import PageHeader from "../ui/common/PageHeader";
@@ -83,12 +83,79 @@ function todayString() {
 export default function OnboardingPage() {
   const { activeProfile } = useAppContext();
   const navigate = useNavigate();
+  const [loadedProfileId, setLoadedProfileId] = useState<string | null>(null);
 
   const [stage, setStage] = useState<"guide" | "intake">("guide");
   const [guideIndex, setGuideIndex] = useState(0);
   const [answers, setAnswers] =
     useState<IntakeAnswers>(initialAnswers);
   const [error, setError] = useState("");
+  useEffect(() => {
+  if (!activeProfile) {
+    setLoadedProfileId(null);
+    return;
+  }
+
+  const profileId = activeProfile.id;
+
+  try {
+    const savedIntake = localStorage.getItem(
+      `femora.intake.v1.${profileId}`,
+    );
+
+    if (savedIntake) {
+      const parsed = JSON.parse(savedIntake) as Partial<IntakeAnswers> & {
+        completedAt?: string;
+      };
+
+      if (parsed.completedAt) {
+        setLoadedProfileId(profileId);
+        navigate("/select-journey", { replace: true });
+        return;
+      }
+    }
+
+    const savedDraft = localStorage.getItem(
+      `femora.intake-draft.v1.${profileId}`,
+    );
+
+    if (savedDraft) {
+      const parsed = JSON.parse(savedDraft) as Partial<IntakeAnswers>;
+
+      setAnswers({ ...initialAnswers, ...parsed });
+      setStage("intake");
+    } else {
+      setAnswers(initialAnswers);
+      setStage("guide");
+      setGuideIndex(0);
+    }
+
+    setLoadedProfileId(profileId);
+  } catch {
+    setAnswers(initialAnswers);
+    setStage("guide");
+    setLoadedProfileId(profileId);
+  }
+}, [activeProfile?.id, navigate]);
+
+useEffect(() => {
+  if (!activeProfile || loadedProfileId !== activeProfile.id) {
+    return;
+  }
+
+  if (stage !== "intake") {
+    return;
+  }
+
+  try {
+    localStorage.setItem(
+      `femora.intake-draft.v1.${activeProfile.id}`,
+      JSON.stringify(answers),
+    );
+  } catch {
+    setError("Your answers could not be saved in this browser.");
+  }
+}, [answers, activeProfile, loadedProfileId, stage]);
 
   function update<K extends keyof IntakeAnswers>(
     key: K,
@@ -159,12 +226,16 @@ export default function OnboardingPage() {
         completedAt: new Date().toISOString(),
       };
 
-      localStorage.setItem(
-        `femora.intake.v1.${activeProfile.id}`,
-        JSON.stringify(payload),
-      );
+     localStorage.setItem(
+  `femora.intake.v1.${activeProfile.id}`,
+  JSON.stringify(payload),
+);
 
-      navigate("/select-journey");
+localStorage.removeItem(
+  `femora.intake-draft.v1.${activeProfile.id}`,
+);
+
+navigate("/select-journey");
     } catch {
       setError(
         "Your answers could not be saved in this browser. Check available storage and try again.",

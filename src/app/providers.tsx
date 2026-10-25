@@ -19,7 +19,11 @@ interface AppContextValue {
   createProfile: (nickname: string) => LocalProfile | null;
   selectProfile: (profileId: string) => void;
   clearActiveProfile: () => void;
-  deleteProfile: (profileId: string) => void;
+    deleteProfile: (profileId: string) => void;
+  updateProfileJourney: (
+    profileId: string,
+    journey: LocalProfile["journey"],
+  ) => boolean;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -77,6 +81,30 @@ export function AppProviders({ children }: { children: ReactNode }) {
   function clearActiveProfile() {
     setActiveProfileId(null);
   }
+  
+  function updateProfileJourney(
+    profileId: string,
+    journey: LocalProfile["journey"],
+  ): boolean {
+    if (!journey) return false;
+
+    const profileExists = profiles.some(
+      (profile) => profile.id === profileId,
+    );
+
+    if (!profileExists) return false;
+
+    setProfiles((current) =>
+      current.map((profile) =>
+        profile.id === profileId
+          ? { ...profile, journey }
+          : profile,
+      ),
+    );
+
+    return true;
+  }
+
 
   function deleteProfile(profileId: string) {
     const confirmed = window.confirm(
@@ -94,6 +122,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
     }
   }
 
+  
   const value: AppContextValue = {
     profiles,
     activeProfile,
@@ -103,6 +132,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
     selectProfile,
     clearActiveProfile,
     deleteProfile,
+    updateProfileJourney,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

@@ -1,3 +1,4 @@
+
 import { NavLink } from "react-router-dom";
 
 const items = [
@@ -15,9 +16,14 @@ export default function MobileNavigation() {
         <NavLink
           key={item.path}
           to={item.path}
-          className={({ isActive }) => `mobile-nav-item${isActive ? " active" : ""}`}
+          end={item.path === "/home"}
+          className={({ isActive }) =>
+            `mobile-nav-item${isActive ? " active" : ""}`
+          }
         >
-          <span className="mobile-nav-icon" aria-hidden="true">{item.icon}</span>
+          <span className="mobile-nav-icon" aria-hidden="true">
+            {item.icon}
+          </span>
           <span className="mobile-nav-label">{item.label}</span>
         </NavLink>
       ))}
