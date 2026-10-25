@@ -1,0 +1,19 @@
+FEMORA core-engine patch — backup restore after wipe
+
+Files included (replace the matching paths in your FEMORA repo):
+- src/core/backup/backup.ts
+- src/core/contracts.ts
+- src/crypto/vault.ts
+- tests/core.test.ts
+
+What changed:
+- PIN-protected exports remain AES-GCM encrypted with the profile vault/data key.
+- The backup includes only the non-secret key-wrapping metadata needed to recover that vault key from the user's PIN after a wipe. It does not include the PIN or the pinCheck verifier.
+- PIN-protected backups can be inspected/restored with the profile PIN after the session and settings have been cleared.
+- Added a regression test for export -> wipe -> wrong PIN rejected -> correct PIN restore -> unlock -> verify data.
+- No-PIN backups remain plaintext and return warning=true.
+
+Important verification limitation:
+The test/typecheck commands could not complete in this environment because dependencies are missing (Vitest, Dexie, Zod, React). Static source assertions passed, but this is NOT a substitute for running the project test suite. Run npm ci, then npm test, npm run typecheck, npm run lint, and npm run build locally before merging.
+
+This patch does not modify README.md and does not commit or push anything.

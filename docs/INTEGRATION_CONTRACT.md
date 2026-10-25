@@ -1,0 +1,31 @@
+# Integration Contracts
+
+## Person 1 — Frontend
+Use `coreApi` from `src/data/public.ts`. `createProfile` requests persistent browser storage on the first profile and returns `storagePersistence` (`granted`, `denied`, `unsupported`, or `error`); `getStoragePersistenceStatus` also returns this structured state. It offers profile creation/list/select/update/delete/wipe (setting `activeJourney` also creates/reactivates journey state while retaining history); repository CRUD/query methods for profile-scoped tables; menstrual, maternity, and menopause check-in/trend operations; journey switching; PIN setup/unlock/lock; and backup export/restore. Results are structured as `{ok:true,data}` or `{ok:false,code,message}`. PIN-protected selection is performed by `unlock`, which selects the profile after deriving the key. Call `touch(vault)` for user activity between Core Engine operations. Do not access Dexie or retain decrypted health rows after lock/profile switch. Select the backup destination profile before restoring an unprotected backup; PIN-protected restore verifies/unlocks the matching profile.
+
+Date-only values use `YYYY-MM-DD`; timestamps are ISO-8601. New check-ins also carry an immutable UTC `loggedAt` timestamp for profile/journey-scoped history queries. Menstrual and pregnancy outputs are derived estimates, not medical certainty. The phase convention and all safety behavior are awaiting clinical review.
+
+## Person 3 — AI/reporting
+Call synchronous `coreApi.evaluateSafety(journey,payload)` before any AI explanation for UI feedback; it is a direct safety result, not the asynchronous `{ok,data}` facade wrapper. Its result includes `evaluationStatus` (`unavailable` or `evaluated`) in addition to level, rule IDs, message key, source ID, review status, and trigger status. The empty catalog returns `level: info` as a non-clinical placeholder, `evaluationStatus: unavailable`, `reviewStatus: review_pending`, and `triggered: true`, and `guidanceMessage` directing users to a qualified healthcare professional or local emergency service if symptoms may be urgent; callers must display/handle this as unavailable, not as an assessment or clearance. `buildAiPayload` independently validates and reevaluates supplied check-ins and does not trust caller-provided safety status. It returns `SAFETY_REVIEW` when the canonical result is unavailable or triggered and `CONSENT_REQUIRED` without granted consent. Successful payloads (only possible when a reviewed catalog returns no finding) contain only journey, canonical safety/consent metadata, coded symptom aggregates, and a count. No profile ID, dates, notes, free-text symptoms, database handle, PIN, or key is included. No network call is made in the Core Engine. The current safety catalog is empty, so the AI helper blocks explanations.
+
+## Assumptions to confirm
+The interfaces assume one active profile context per browser tab; profile lock/switch broadcasts invalidation to other tabs over BroadcastChannel or the storage-event fallback, manually supplied symptom codes, LMP-based dating, no age-derived menopause stage, and no clinical safety rules until sourced and reviewed. An unprotected profile backup contains plaintext and returns `warning: true`; the frontend must obtain explicit acknowledgement before offering it for file saving or sharing. Please confirm the symptom vocabulary, aggregate fields, pagination needs, consent policy, and key recovery requirements before depending on these contracts.
+
+
+
+
+
+
+
+
+## Public profile protection, persistence, wipe, and backup fields
+
+`coreApi.createProfile(name)` returns `Result<ProfileCreation>`. On success, `data` contains the ordinary profile fields, `isEncrypted: false`, `persistentStorageGranted`, and `storagePersistence: { state: 'granted' | 'denied' | 'unsupported' | 'error'; supported: boolean; granted: boolean }`. The first profile triggers `navigator.storage.persist()` when available; later profile creations inspect `persisted()` instead of requesting again. A failed or unsupported persistence request does not fail profile creation. A returned grant is the browser's response, not a guarantee against every form of data loss.
+
+`coreApi.listProfiles()`, `selectProfile(id)`, `getActiveProfile()`, and `updateProfile(id, patch)` return `PublicProfile` values with `isEncrypted: boolean`. `true` means PIN protection metadata is complete and valid and all stored health payloads use the encrypted storage representation. This field does not claim that ciphertext has been authenticated; authentication happens when encrypted records are decrypted. Missing, malformed, or inconsistent settings or plaintext health payloads produce `false`. No PIN verifier, salt, wrapped key, or raw key is returned.
+
+`coreApi.exportBackup(profileId, vault?)` returns `Result<EncryptedBackup>`. Every new export includes `isEncrypted` and `requiresPlaintextWarning`, plus the legacy `warning` field. PIN-protected export is `{ mode: 'profile-key', isEncrypted: true, requiresPlaintextWarning: false, warning: false }`; an unprotected export is `{ mode: 'plaintext', isEncrypted: false, requiresPlaintextWarning: true, warning: true }`. Reject an export result with `ok: false`; for plaintext, show a clear warning and require the person's acknowledgement in the frontend before saving or sharing it. The Core Engine does not implement or claim that frontend acknowledgement UI. `inspectBackup` rejects contradictory warning/protection fields and still accepts the previous v1 `warning`-only representation for compatibility.
+
+`coreApi.wipeProfile(profileId)` returns `Result<{ profileId: string; wiped: true }>` and removes every row for that profile, including settings and wrapped key metadata, in one IndexedDB transaction. It preserves the profile identity row for restore workflows, clears its active session/key when applicable, and invalidates matching sessions in other tabs. It does not guarantee physical media erasure. Wiping a missing profile returns `NOT_FOUND`; use `deleteProfile` when the profile identity itself should be removed.
+
+Import public types from `src/core/contracts.ts` (`PublicProfile`, `ProfileCreation`, `StoragePersistenceStatus`, `ProfileWipeResult`, `EncryptedBackup`). Access data only through `coreApi` in `src/data/public.ts`, not Dexie.

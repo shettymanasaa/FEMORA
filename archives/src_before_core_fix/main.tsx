@@ -1,0 +1,3 @@
+import React from 'react';import{createRoot}from'react-dom/client';import{BrowserRouter,Link,Route,Routes}from'react-router-dom';
+function Home(){return <main><h1>FEMORA</h1><p>Local-first health tracking core is ready for frontend integration.</p><p>This application does not provide diagnosis or treatment.</p><Link to="/core">Core status</Link></main>}function Core(){return <main><h1>Core status</h1><p>Choose or create a profile through the core API.</p><Link to="/">Home</Link></main>}
+createRoot(document.getElementById('root')!).render(<React.StrictMode><BrowserRouter><Routes><Route path="/" element={<Home/>}/><Route path="/core" element={<Core/>}/></Routes></BrowserRouter></React.StrictMode>);
