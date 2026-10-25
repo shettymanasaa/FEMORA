@@ -1,0 +1,148 @@
+﻿
+/* FEMORA — SAGE ROSE THEME TOKENS
+   Light: warm blush + visible sage cards
+   Dark: deep plum + muted sage cards
+*/
+
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #FFF3F1;
+  --surface: #E5EEE5;
+  --surface-raised: #F0F5EF;
+  --card: #E5EEE5;
+  --card-bg: #E5EEE5;
+  --text: #3D2229;
+  --text-secondary: #7A5560;
+  --muted: #7A5560;
+  --border: #D3DED1;
+  --border-strong: #A7BBA5;
+  --rose: #B34A5B;
+  --rose-accent: #B34A5B;
+  --rose-soft: #F7DFDE;
+  --sage: #819982;
+  --sage-soft: #E5EEE5;
+  --focus: #819982;
+  --danger: #A52E43;
+
+  --page-background: var(--bg);
+  --card-background: var(--surface);
+  --button-primary-bg: var(--rose);
+  --button-primary-text: #FFFFFF;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #1E1416;
+  --surface: #2B3430;
+  --surface-raised: #344039;
+  --card: #2B3430;
+  --card-bg: #2B3430;
+  --text: #FBEDEA;
+  --text-secondary: #D2B9BB;
+  --muted: #D2B9BB;
+  --border: #46554A;
+  --border-strong: #758C78;
+  --rose: #F2A0A8;
+  --rose-accent: #F2A0A8;
+  --rose-soft: #48272E;
+  --sage: #A6BCA5;
+  --sage-soft: #344039;
+  --focus: #A6BCA5;
+  --danger: #FFB4BC;
+
+  --page-background: var(--bg);
+  --card-background: var(--surface);
+  --button-primary-bg: var(--rose);
+  --button-primary-text: #241619;
+}
+
+/* Keep the canvas themed even when scrolling. */
+html,
+body,
+#root {
+  min-height: 100%;
+  background-color: var(--bg);
+  color: var(--text);
+}
+
+/* Prevent inherited browser-white surfaces. */
+.section-card,
+.profile-card,
+.notice,
+.standalone-content .empty-state,
+.standalone-content .list-stack > .button,
+main.standalone-page,
+.standalone-content {
+  color: var(--text);
+}
+
+/* Profile cards: compact, consistent, sage tinted. */
+.profile-card {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 18px;
+  padding: 20px 22px;
+  box-shadow: 0 5px 18px rgb(39 30 27 / 5%);
+}
+
+.section-card,
+.empty-state {
+  background: var(--surface) !important;
+  border-color: var(--border);
+}
+
+.notice-sage {
+  background: var(--sage-soft) !important;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 16px;
+}
+
+.profile-card h3,
+.profile-card p,
+.notice-sage p {
+  color: var(--text);
+}
+
+/* Buttons must stay visible in both themes. */
+.button-primary {
+  background: var(--button-primary-bg) !important;
+  color: var(--button-primary-text) !important;
+  border: 1px solid var(--button-primary-bg);
+}
+
+.button-secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+}
+
+.button-primary:hover {
+  filter: brightness(0.94);
+}
+
+.button-secondary:hover {
+  background: var(--sage-soft);
+}
+
+.button-primary:focus-visible,
+.button-secondary:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+@media (max-width: 640px) {
+  .profile-card {
+    padding: 16px;
+    gap: 12px;
+  }
+
+  .profile-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+}
